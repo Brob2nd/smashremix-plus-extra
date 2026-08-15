@@ -9,7 +9,7 @@ from pathlib import Path
 
 from smashremix_extra.image_appender import append_image, get_image_data, ImageMode
 from smashremix_extra.constants import SMASHREMIX_PATH as smashremix_path, VARIANT_TYPES
-from smashremix_extra.asm_util import add_to_scope, add_to_scope_on_empty, add_to_label
+from smashremix_extra.asm_util import add_to_scope, add_to_scope_on_empty, add_to_label, add_to_label_on_empty
 from smashremix_extra.rom_util import run_windows_command, extract_files
 from smashremix_extra.smashremix.kirbyshared import kirby_shared
 from smashremix_extra.logger import logger
@@ -56,6 +56,16 @@ class CharacterAppender:
             default_nameplate_pixels, w, h, ImageMode.IA8
         )
         self.name_texture_default = f"0x{name_texture_offset:08X} + 0x10"
+
+
+        default_sp_icon_pixels, w, h = get_image_data(
+            "extra_resources/1p_icon.png")
+        sp_icon_offset = append_image(
+            "scripts/000B.bin", "scripts/000B.bin",
+            default_sp_icon_pixels, w, h, ImageMode.RGBA5551
+        )
+        self.sp_icon_default = f"0x{sp_icon_offset:08X} + 0x10"
+
 
         self.char_folders = [cf for cf in os.listdir("extra_characters") if os.path.isdir(
             os.path.join("extra_characters", cf)) and not cf.startswith("_")]
@@ -108,6 +118,7 @@ class CharacterAppender:
 
         self.char_proc = CharacterProcessor(
             name_texture_default=self.name_texture_default,
+            sp_icon_default=self.sp_icon_default,
             last_sfx_id=last_sfx_id,
             last_remix_sfx_id=last_remix_sfx_id,
             sword_trail_count=sword_trail_count,
@@ -880,10 +891,34 @@ class CharacterAppender:
         lineinfile.add_line_to_file(
             filepath="src/SinglePlayer.asm",
             line="\t\t" +
-            "\n\t\t".join(self.char_proc.singleplayer_name_width_defs),
-            inserter=lineinfile.BeforeLast(
-                r'.*// use normal width otherwise.*')
+            "\n\t\t".join(self.char_proc.singleplayer_name_width_defs["normal"]),
+            inserter=lineinfile.BeforeLast(r'.*// use normal width otherwise.*')
         )
+
+        # SinglePlayerModes.asm
+        lineinfile.add_line_to_file(
+            filepath="src/SinglePlayerModes.asm",
+            line="\t"+"\n\t".join(self.char_proc.singleplayer_remix_match_defs),
+            inserter=lineinfile.BeforeLast(r".*// Add entry here if a new variant.type.NA character is added UPDATE.*")
+        )
+
+        lineinfile.add_line_to_file(
+            filepath="src/SinglePlayerModes.asm",
+            line="\t\t" +
+            "\n\t\t".join(self.char_proc.singleplayer_name_width_defs["team"]),
+            inserter=lineinfile.BeforeLast(r'.*b       _adjust_footer_team.*')
+        )
+
+        lineinfile.add_line_to_file(
+            filepath="src/SinglePlayerModes.asm",
+            line="\t\t" +
+            "\n\t\t".join(self.char_proc.singleplayer_name_width_defs["giant"]),
+            inserter=lineinfile.BeforeLast(r'.*b       _done_giant.*')
+        )
+
+        add_to_scope("src/SinglePlayerModes.asm", "progress_icon", self.char_proc.character_1p_icon_defs)
+        add_to_label_on_empty("src/SinglePlayerModes.asm", "duo_array", self.char_proc.character_1p_duo_parameter_defs)
+        add_to_label_on_empty("src/SinglePlayerModes.asm", "team_array", self.char_proc.character_1p_team_parameter_defs)
 
         # TwelveCharBattle.asm
         lineinfile.add_line_to_file(
@@ -1164,7 +1199,7 @@ class CharacterAppender:
         lineinfile.add_line_to_file(
             filepath="src/Hazards.asm",
             line="\t"+"\n\t".join(hazards_import_strings)+"\n\n",
-            inserter=lineinfile.AfterFirst(r'^scope Hazards.*')
+            inserter=lineinfile.BeforeFirst(r'^} // __HAZARDS__.*')
         )
 
         # add Character.asm include to Hazards.asm

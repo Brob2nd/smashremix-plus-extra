@@ -8,7 +8,7 @@ from pathlib import Path
 
 from smashremix_extra.constants import (
     SMASHREMIX_PATH as smashremix_path,
-    PRIMARY_MOVESETS, SHIELD_POSES, TWELVECB_DEFEAT, COMMAND_SIZES, ExtraFile,
+    PRIMARY_MOVESETS, SHIELD_POSES, TWELVECB_DEFEAT, SP_DUO_POSES, SP_TEAM_POSES, COMMAND_SIZES, ExtraFile,
 )
 from smashremix_extra.image_appender import append_image, get_image_data, ImageMode
 from smashremix_extra.file_appender import append_file, get_pointer, update_pointer
@@ -26,12 +26,14 @@ class CharacterProcessor:
     def __init__(
         self,
         name_texture_default: str,
+        sp_icon_default: str,
         last_sfx_id: int,
         last_remix_sfx_id: int,
         sword_trail_count: int,
         characters_exist: list,
     ):
         self.name_texture_default = name_texture_default
+        self.sp_icon_default = sp_icon_default
         self.LAST_SFX_ID = last_sfx_id
         self.LAST_REMIX_SFX_ID = last_remix_sfx_id
         self.SWORD_TRAIL_COUNT = sword_trail_count
@@ -43,12 +45,16 @@ class CharacterProcessor:
         self.add_to_css_strings = []
         self.victory_theme_strings = []
         self.singleplayer_additions = []
-        self.singleplayer_name_width_defs = []
+        self.singleplayer_name_width_defs = {"normal": [], "team": [], "giant": []}
+        self.singleplayer_remix_match_defs = []
         self.character_names = []
         self.character_skins = []
         self.character_series_models = {}
         self.character_series_textures = {}
         self.character_portrait_defs = []
+        self.character_1p_icon_defs = []
+        self.character_1p_duo_parameter_defs = []
+        self.character_1p_team_parameter_defs = []
         self.character_12cb_defs = []
         self.character_tag_team_preloads = []
         self.character_data_screen_defs = []
@@ -553,11 +559,13 @@ class CharacterProcessor:
             announcer_fgm = f"0x{
                 character_sound_add_list.get(sound_name)}"
 
+
         # Calculate 1P name delay if announcer FGM is found
+        sp_config = config.get("singleplayer", {})
         name_delay_sp = "name_delay.DRAGONKING"
 
-        if config.get("singleplayer", {}).get("name_delay"):
-            name_delay_sp = f"0x{config.get("singleplayer", {}).get("name_delay"):08X}"
+        if sp_config.get("name_delay"):
+            name_delay_sp = f"0x{sp_config.get("name_delay"):08X}"
         elif config.get("announcer_fgm"):
             announcer = config.get("sounds").get(
                 config.get("announcer_fgm"))
@@ -589,12 +597,96 @@ class CharacterProcessor:
             f'add_to_single_player(Character.id.{character_folder.upper()}, {name_texture_sp}, {name_delay_sp})')
 
         # Use alternate width for character's 1P name texture if defined
-        if config.get("singleplayer", {}).get("alt_name_width"):
-            self.singleplayer_name_width_defs.append(
-                f"lli     t6, Character.id.{character_folder.upper()}            // t6 = {character_folder.upper()}"
-                f"\n\t\tbeql    t0, t6, _alt_width                // use alt width if {character_folder.title()}"
-                f"\n\t\tlli     t6, 0x{config.get("singleplayer", {}).get("alt_name_width"):04X}                        // t6 = width of \"{character_folder.title()}\""
+        alt_name_width = sp_config.get("alt_name_width", None)
+        alt_name_width_team = sp_config.get("alt_name_width_team", alt_name_width)
+        alt_name_width_giant = sp_config.get("alt_name_width_giant", alt_name_width)
+
+        if alt_name_width:
+            self.singleplayer_name_width_defs["normal"].append(
+                f"lli     t6, Character.id.{character_folder.upper()}\n\t\t"
+                f"beql    t0, t6, _alt_width                // use alt width if {character_name}\n\t\t"
+                f"lli     t6, 0x{alt_name_width:04X}                        // t6 = width of \"{character_name}\""
             )
+
+        if alt_name_width or alt_name_width_team:
+            self.singleplayer_name_width_defs["team"].append(
+                f"lli     t6, {name_texture_sp} + 0x10\n\t\t"
+                f"beql    t8, t6, _set_alt_width_team // if {character_name}, use alternate width\n\t\t"
+                f"lli     t6, 0x{alt_name_width_team:04X}                  // t6 = width of \"{character_name}\""
+            )
+
+        if alt_name_width or alt_name_width_giant:
+            self.singleplayer_name_width_defs["giant"].append(
+                f"lli     t6, {name_texture_sp} + 0x10\n\t\t"
+                f"beql    t8, t6, _set_alt_width_giant // if {character_name}, use alternate width\n\t\t"
+                f"lli     t6, 0x{alt_name_width_giant:04X}                  // t6 = width of \"{character_name}\""
+            )
+
+        # Check for 1P icon and use if found
+        icon_offset = self.sp_icon_default
+
+        if os.path.isfile(f"{output_path}/1p_icon.png"):
+            pixels, w, h = get_image_data(
+                f"{output_path}/1p_icon.png"
+            )
+            icon_offset = append_image(
+                "scripts/000B.bin",
+                "scripts/000B.bin",
+                pixels,
+                w, h,
+                ImageMode.RGBA5551
+            )
+            icon_offset = f"0x{icon_offset:X} + 0x10"
+
+        self.character_1p_icon_defs.append(
+            f"constant {character_folder.upper()}({icon_offset})")
+
+        singleplayer_icon = f"progress_icon.{character_folder.upper()}"
+
+        # Remix 1P Character Battle versus parameters
+        if config.get("definitions", {}).get("variant_type", "SPECIAL") == "NA":
+
+            flags = sp_config.get("flags", 0)
+
+            stage1 = sp_config.get("stage1", "DREAM_LAND")
+            stage2 = sp_config.get("stage2", "WINTER_DL")
+            stage3 = sp_config.get("stage3", "FINAL_DESTINATION_DL")
+
+            scale = sp_config.get("scale", "6F80").zfill(8)
+
+            self.singleplayer_remix_match_defs.extend([
+                f"// {character_name} match settings",
+                f"{character_folder.lower()}_match_setting:",
+                f"dw  0x{flags} // flag",
+                f"db  Character.id.{character_folder.upper()} // Character ID",
+                f"db  Stages.id.{stage1} // Stage Option 1",
+                f"db  Stages.id.{stage2} // Stage Option 2",
+                f"db  Stages.id.{stage3} // Stage Option 3",
+                f"dw  {name_texture_sp} + 0x10 // name texture",
+                f"dw  {announcer_fgm} // Announcer Call",
+                f"dw  0x{scale} // Model Scale",
+                f"dw  progress_icon.{character_folder.upper()} // Progress Icon\n",
+            ])
+
+        # Remix 1P Duo menu parameters
+        duo_config = sp_config.get("duo", {})
+
+        anim = duo_config.get("anim", SP_DUO_POSES.get(config['definitions']['base_character']))
+        moveset = duo_config.get("moveset", "duo_moveset")
+        flags = duo_config.get("flags", 0)
+
+        self.character_1p_duo_parameter_defs.append(
+            f"add_duo_parameters({anim}, {moveset}, {flags}) // {character_folder.upper()}")
+
+        # Remix 1P Team menu parameters
+        team_config = sp_config.get("team", {})
+
+        anim = team_config.get("anim", SP_TEAM_POSES.get(config['definitions']['base_character']))
+        moveset = team_config.get("moveset", "team_moveset")
+        flags = team_config.get("flags", 0)
+
+        self.character_1p_team_parameter_defs.append(
+            f"add_team_parameters({anim}, {moveset}, {flags}) // {character_folder.upper()}")
 
         # Get series to use for character
         series_css = config.get("definitions", {}).get(
@@ -910,7 +1002,7 @@ class CharacterProcessor:
                 w, h,
                 ImageMode.I8
             )
-            bio_texture += int("0x80000000", 16)
+            bio_texture += 0x80000000
             bio_texture = f"0x{bio_texture:08X}"
 
         if os.path.exists(f"{output_path}/datascreen/name.png"):
@@ -924,7 +1016,7 @@ class CharacterProcessor:
                 w, h,
                 ImageMode.I8
             )
-            name_texture += int("0x80000000", 16)
+            name_texture += 0x80000000
             name_texture = f"0x{name_texture:08X}"
 
         if os.path.exists(f"{output_path}/datascreen/works.png"):
@@ -938,7 +1030,7 @@ class CharacterProcessor:
                 w, h,
                 ImageMode.I8
             )
-            works_texture += int("0x80000000", 16)
+            works_texture += 0x80000000
             works_texture = f"0x{works_texture:08X}"
 
         if os.path.exists(f"{output_path}/datascreen/special_u.png"):
@@ -952,7 +1044,7 @@ class CharacterProcessor:
                 w, h,
                 ImageMode.I8
             )
-            usp_texture += int("0x80000000", 16)
+            usp_texture += 0x80000000
             usp_texture = f"0x{usp_texture:08X}"
 
         if os.path.exists(f"{output_path}/datascreen/special_n.png"):
@@ -966,7 +1058,7 @@ class CharacterProcessor:
                 w, h,
                 ImageMode.I8
             )
-            nsp_texture += int("0x80000000", 16)
+            nsp_texture += 0x80000000
             nsp_texture = f"0x{nsp_texture:08X}"
 
         if os.path.exists(f"{output_path}/datascreen/special_d.png"):
@@ -980,7 +1072,7 @@ class CharacterProcessor:
                 w, h,
                 ImageMode.I8
             )
-            dsp_texture += int("0x80000000", 16)
+            dsp_texture += 0x80000000
             dsp_texture = f"0x{dsp_texture:08X}"
 
         add_to_data_string = (

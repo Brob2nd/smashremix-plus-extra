@@ -55,6 +55,7 @@ def get_attrib_offset(main_file_path: str) -> str:
 def extract_files(smashremix_path: str) -> None:
     """Extract the ROM files that need to be edited from original.z64 into scripts/."""
     FILES_TO_EXTRACT = [
+        0xB,     # 1P icons
         0xC,     # 1P nameplates
         0x11,    # CSS nameplates
         0x14,    # 2D series logos (CSS, SSS)
