@@ -31,6 +31,7 @@ class CharacterProcessor:
         last_remix_sfx_id: int,
         sword_trail_count: int,
         characters_exist: list,
+        stage_ids: set = None,
     ):
         self.name_texture_default = name_texture_default
         self.sp_icon_default = sp_icon_default
@@ -38,6 +39,7 @@ class CharacterProcessor:
         self.LAST_REMIX_SFX_ID = last_remix_sfx_id
         self.SWORD_TRAIL_COUNT = sword_trail_count
         self.characters_exist = characters_exist
+        self.stage_ids = stage_ids
 
         self.bonus_chars = []
         self.character_defs = []
@@ -45,7 +47,9 @@ class CharacterProcessor:
         self.add_to_css_strings = []
         self.victory_theme_strings = []
         self.singleplayer_additions = []
-        self.singleplayer_name_width_defs = {"normal": [], "team": [], "giant": []}
+        self.singleplayer_name_width_defs = {
+            "normal": [], "team": [], "giant": []
+        }
         self.singleplayer_remix_match_defs = []
         self.character_names = []
         self.character_skins = []
@@ -82,12 +86,29 @@ class CharacterProcessor:
         self.dk_cargo_defs_6 = []
         self.dk_cargo_defs_7 = []
         self.dk_cargo_defs_8 = []
+        self.dk_fully_charged_defs = []
+        self.dk_kirby_flash_defs = []
+        self.dk_kirby_power_defs = []
+        self.dk_giant_punch_defs = []
+        self.dk_cpu_fix_2_defs = []
         self.sound_add_list = []
         self.sword_trail_add_list = []
         self.items_added = 0
         self.midi_priority_overrides = []
         self.midi_bend_range_overrides = []
         self.midi_master_volume_overrides = []
+
+    def _validate_stage_id(self, character_name: str, key: str, stage_id: str, default: str) -> str:
+        """Fall back to `default` (logging a warning) if `stage_id` isn't a
+        known Stages.id.X name, so a typo'd/removed singleplayer stage
+        reference in a character's config.yaml doesn't fail the whole build."""
+        if self.stage_ids is not None and stage_id not in self.stage_ids:
+            logger.warning(
+                f"{character_name}: singleplayer.{key} references unknown stage '{stage_id}'. "
+                f"Falling back to '{default}'."
+            )
+            return default
+        return stage_id
 
     def process(self, character_folder: str) -> None:
         """Process one character folder and accumulate patch data into self."""
@@ -209,17 +230,20 @@ class CharacterProcessor:
 
                         data_part = get_pointer(data, list_pos, "data")
                         if data_part != 0:
-                            update_pointer(data, list_pos, data_part + offset_to_add, "data")
+                            update_pointer(
+                                data, list_pos, data_part + offset_to_add, "data")
 
                         if next_list_item == 0x3FFFC:
                             if i < len(files_data)-1:
                                 # Point to start of next list instead of FFFF
                                 next_list_offset = int(
                                     file[i+1][1], 16) + sum(files_sizes[:i+1])
-                                update_pointer(data, list_pos, next_list_offset, "next")
+                                update_pointer(
+                                    data, list_pos, next_list_offset, "next")
                             break
 
-                        update_pointer(data, list_pos, next_list_item + offset_to_add, "next")
+                        update_pointer(
+                            data, list_pos, next_list_item + offset_to_add, "next")
                         current = next_list_item
 
                     if list1_start != 0x3FFFC:
@@ -242,10 +266,12 @@ class CharacterProcessor:
                                 # Point to start of next list instead of FFFF
                                 next_list_offset = int(
                                     file[i+1][2], 16) + sum(files_sizes[:i+1])
-                                update_pointer(data, list_pos, next_list_offset, "next")
+                                update_pointer(
+                                    data, list_pos, next_list_offset, "next")
                             break
 
-                        update_pointer(data, list_pos, next_list_item + offset_to_add, "next")
+                        update_pointer(
+                            data, list_pos, next_list_item + offset_to_add, "next")
                         current = next_list_item
 
                     if list2_start != 0x3FFFC:
@@ -463,19 +489,19 @@ class CharacterProcessor:
             # jab3, inhale copy
             f"OS.TRUE, "
             # inhale copy
-            f"OS.{config.get("definitions",{}).get("kirby_hat", "FALSE")}, "
+            f"OS.{config.get("definitions", {}).get("kirby_hat", "FALSE")}, "
             # btt_stage_id
-            f"Stages.id.BTT_{config.get("definitions",{}).get("break_the_targets", "STG1")}, "
+            f"Stages.id.BTT_{config.get("definitions", {}).get("break_the_targets", "STG1")}, "
             # btp_stage_id
-            f"Stages.id.BTP_{config.get("definitions",{}).get("board_the_platforms", "POLY")}, "
+            f"Stages.id.BTP_{config.get("definitions", {}).get("board_the_platforms", "POLY")}, "
             # remix_btt_stage_id
-            f"Stages.id.BTT_{config.get("definitions",{}).get("break_the_targets", "STG1")}, "
+            f"Stages.id.BTT_{config.get("definitions", {}).get("break_the_targets", "STG1")}, "
             # remix_btp_stage_id
-            f"Stages.id.BTP_{config.get("definitions",{}).get("board_the_platforms", "POLY")}, "
+            f"Stages.id.BTP_{config.get("definitions", {}).get("board_the_platforms", "POLY")}, "
             # sound_type, variant_type
             f"sound_type.U, "
             # variant_type
-            f"variant_type.{config.get("definitions",{}).get("variant_type", "SPECIAL")})"
+            f"variant_type.{config.get("definitions", {}).get("variant_type", "SPECIAL")})"
         )
 
         # Character name
@@ -565,7 +591,6 @@ class CharacterProcessor:
             announcer_fgm = f"0x{
                 character_sound_add_list.get(sound_name)}"
 
-
         # Calculate 1P name delay if announcer FGM is found
         sp_config = config.get("singleplayer", {})
         name_delay_sp = "name_delay.DRAGONKING"
@@ -604,8 +629,10 @@ class CharacterProcessor:
 
         # Use alternate width for character's 1P name texture if defined
         alt_name_width = sp_config.get("alt_name_width", None)
-        alt_name_width_team = sp_config.get("alt_name_width_team", alt_name_width)
-        alt_name_width_giant = sp_config.get("alt_name_width_giant", alt_name_width)
+        alt_name_width_team = sp_config.get(
+            "alt_name_width_team", alt_name_width)
+        alt_name_width_giant = sp_config.get(
+            "alt_name_width_giant", alt_name_width)
 
         if alt_name_width:
             self.singleplayer_name_width_defs["normal"].append(
@@ -654,9 +681,12 @@ class CharacterProcessor:
 
             flags = sp_config.get("flags", 0)
 
-            stage1 = sp_config.get("stage1", "DREAM_LAND")
-            stage2 = sp_config.get("stage2", "WINTER_DL")
-            stage3 = sp_config.get("stage3", "FINAL_DESTINATION_DL")
+            stage1 = self._validate_stage_id(
+                character_name, "stage1", sp_config.get("stage1", "DREAM_LAND"), "DREAM_LAND")
+            stage2 = self._validate_stage_id(
+                character_name, "stage2", sp_config.get("stage2", "DREAM_LAND"), "DREAM_LAND")
+            stage3 = self._validate_stage_id(
+                character_name, "stage3", sp_config.get("stage3", "DREAM_LAND"), "DREAM_LAND")
 
             scale = sp_config.get("scale", "6F80").zfill(8)
 
@@ -677,7 +707,10 @@ class CharacterProcessor:
         # Remix 1P Duo menu parameters
         duo_config = sp_config.get("duo", {})
 
-        anim = duo_config.get("anim", SP_DUO_POSES.get(config['definitions']['base_character']))
+        anim = duo_config.get(
+            "anim",
+            SP_DUO_POSES.get(config['definitions']['base_character'])
+        )
         moveset = duo_config.get("moveset", "duo_moveset")
         flags = duo_config.get("flags", 0)
 
@@ -687,7 +720,10 @@ class CharacterProcessor:
         # Remix 1P Team menu parameters
         team_config = sp_config.get("team", {})
 
-        anim = team_config.get("anim", SP_TEAM_POSES.get(config['definitions']['base_character']))
+        anim = team_config.get(
+            "anim",
+            SP_TEAM_POSES.get(config['definitions']['base_character'])
+        )
         moveset = team_config.get("moveset", "team_moveset")
         flags = team_config.get("flags", 0)
 
@@ -1127,7 +1163,10 @@ class CharacterProcessor:
             )
 
         # 12 Character Battle defeat parameters
-        anim = config.get("12cb", {}).get("anim", TWELVECB_DEFEAT.get(config['definitions']['base_character']))
+        anim = config.get("12cb", {}).get(
+            "anim",
+            TWELVECB_DEFEAT.get(config['definitions']['base_character'])
+        )
         moveset = config.get("12cb", {}).get("moveset", "defeated_moveset")
         flags = config.get("12cb", {}).get("flags", 0)
         self.character_12cb_defs.append(
@@ -1249,6 +1288,32 @@ class CharacterProcessor:
             self.dk_cargo_defs_8.append(
                 f"\taddiu   at, r0, Character.id.{character_folder.upper()} // {character_folder.upper()} ID"
                 f"\n\t\tbeq     v0, at, _item_jump_6"
+            )
+
+            # Extends dkshared.asm's "is this fighter a DK clone" ID checks
+            # (only recognize Character.id.JDK) to also recognize this
+            # character: fully-charged Giant Punch effect, DK-powered Kirby
+            # copy ability flash/change, and Giant Punch/cargo action ID
+            # checks used while CPU-controlled.
+            self.dk_fully_charged_defs.append(
+                f"\tbeq     v0, at, j_0x800EAC64        // original line 1, modified to use jump"
+                f"\n\t\tlli     at, Character.id.{character_folder.upper()}        // at = {character_folder.upper()}"
+            )
+            self.dk_kirby_flash_defs.append(
+                f"\tbeq     v1, at, j_0x800E9A18        // original line 1, modified to use jump"
+                f"\n\t\tlli     at, Character.id.{character_folder.upper()}        // at = {character_folder.upper()}"
+            )
+            self.dk_kirby_power_defs.append(
+                f"\tbeq     v0, at, j_0x80161EF0        // original line 1, modified to use jump"
+                f"\n\t\tlli     at, Character.id.{character_folder.upper()}        // at = {character_folder.upper()}"
+            )
+            self.dk_giant_punch_defs.append(
+                f"\taddiu   at, r0, Character.id.{character_folder.upper()} // {character_folder.upper()} ID"
+                f"\n\t\tbeq     v0, at, check_action_giant_punch_"
+            )
+            self.dk_cpu_fix_2_defs.append(
+                f"\taddiu   at, r0, Character.id.{character_folder.upper()} // {character_folder.upper()} ID"
+                f"\n\t\tbeq     v1, at, _cpu_2"
             )
 
         if config.get("kirby_jumps"):
@@ -1541,7 +1606,7 @@ class CharacterProcessor:
         if config.get("attributes", {}).get("forward_throw_animation") or config.get("attributes", {}).get("back_throw_animation"):
             table_offset_pointer = attr_offset + 0x338
             table_offset = int.from_bytes(
-                data[table_offset_pointer+2:table_offset_pointer+4], byteorder="big") * 4 + 4
+                data[table_offset_pointer+2:table_offset_pointer+4], byteorder="big") * 4
 
             fthrow = config.get("attributes", {}).get(
                 "forward_throw_animation")
@@ -1555,16 +1620,26 @@ class CharacterProcessor:
             if bthrow is not None:
                 bthrow = int(bthrow, 16)
 
-            for i in range(53):
-                curr_offset = table_offset + i*8
+            # thrown_status: array of FTThrownStatusArray (fttypes.h), one per
+            # victim id, 16 bytes each - forward status1/status2 at +0/+4,
+            # backward at +8/+12. status2 set to match status1.
+            #
+            # 26 of 27 real entries (54 FTThrownStatus / 2) - the 27th
+            # overlaps a node in the external-file linked list below.
+            for i in range(26):
+                entry_offset = table_offset + i*16
 
                 if fthrow is not None:
-                    data[curr_offset:curr_offset+4] = fthrow.to_bytes(
+                    data[entry_offset:entry_offset+4] = fthrow.to_bytes(
                         4, 'big')
+                    data[entry_offset+4:entry_offset +
+                         8] = fthrow.to_bytes(4, 'big')
 
                 if bthrow is not None:
-                    data[curr_offset+4:curr_offset +
-                         8] = bthrow.to_bytes(4, 'big')
+                    data[entry_offset+8:entry_offset +
+                         12] = bthrow.to_bytes(4, 'big')
+                    data[entry_offset+12:entry_offset +
+                         16] = bthrow.to_bytes(4, 'big')
 
         # Set texture-form entries (FTAttributes.textureparts_container), used by
         # the moveset "Set Texture Form" command to swap a model part between
@@ -1608,8 +1683,13 @@ class CharacterProcessor:
         offset = int(config['offsets']['main'][1], 16)
         pos = offset
         next_pos = None
+        DEBUG_iters = 0
 
         while True:
+            DEBUG_iters += 1
+            if DEBUG_iters > 5000:
+                raise RuntimeError(
+                    f"External file linked list did not terminate for {character_folder} (stuck at pos {pos})")
             # Read next address (first 2 bytes)
             next_bytes = data[pos:pos+2]
             next_pos = int.from_bytes(next_bytes, byteorder='big') * 4

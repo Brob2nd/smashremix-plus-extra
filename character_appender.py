@@ -123,6 +123,7 @@ class CharacterAppender:
             last_remix_sfx_id=last_remix_sfx_id,
             sword_trail_count=sword_trail_count,
             characters_exist=self.char_folders,
+            stage_ids=self._collect_stage_ids(),
         )
         self.stage_proc = StageProcessor()
 
@@ -130,6 +131,43 @@ class CharacterAppender:
         if os.path.exists("build"):
             shutil.rmtree("build")
         os.makedirs("build", exist_ok=True)
+
+    def _collect_stage_ids(self) -> set:
+        """Build the set of every valid Stages.id.X name: vanilla/remix
+        stages (parsed from src/Stages.asm's `scope id { ... }` block)
+        plus every extra stage folder we're about to add (using the same
+        STAGE_<FOLDER> naming StageProcessor generates for them)."""
+        stage_ids = set()
+
+        stages_asm_path = "src/Stages.asm"
+        if os.path.exists(stages_asm_path):
+            with open(stages_asm_path, encoding="utf-8") as f:
+                content = f.read()
+
+            start = content.find("scope id {")
+            if start != -1:
+                depth = 0
+                end = start
+                for i, ch in enumerate(content[start:], start=start):
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i
+                            break
+                block = content[start:end]
+                stage_ids.update(re.findall(r"constant\s+(\w+)\s*\(", block))
+        else:
+            logger.warning(
+                f"Could not find {stages_asm_path} to validate character singleplayer stage references against; "
+                "only extra stages will be treated as valid."
+            )
+
+        for sf in self.stage_folders:
+            stage_ids.add(f"STAGE_{sf.upper().replace('/', '_')}")
+
+        return stage_ids
 
     def prepare_files(self):
         """Process all character and stage folders, registering files with FileManager."""
@@ -841,6 +879,41 @@ class CharacterAppender:
             line="\t"+"\n\t".join(self.char_proc.dk_cargo_defs_8),
             inserter=lineinfile.AfterLast(
                 r".*beq\s*v0, at, _item_jump_6.*")
+        )
+        # fully_charged_check_
+        lineinfile.add_line_to_file(
+            filepath="src/dkshared.asm",
+            line="\t"+"\n\t".join(self.char_proc.dk_fully_charged_defs),
+            inserter=lineinfile.BeforeFirst(
+                r".*beq\s*v0, at, j_0x800EAC64\s*// if JDK, take DK branch.*")
+        )
+        # kirby_power_check_flash_
+        lineinfile.add_line_to_file(
+            filepath="src/dkshared.asm",
+            line="\t"+"\n\t".join(self.char_proc.dk_kirby_flash_defs),
+            inserter=lineinfile.BeforeFirst(
+                r".*beq\s*v1, at, j_0x800E9A18\s*// if JDK, take DK branch.*")
+        )
+        # kirby_power_change_
+        lineinfile.add_line_to_file(
+            filepath="src/dkshared.asm",
+            line="\t"+"\n\t".join(self.char_proc.dk_kirby_power_defs),
+            inserter=lineinfile.BeforeFirst(
+                r".*beq\s*v0, at, j_0x80161EF0\s*// if JDK, take DK branch.*")
+        )
+        # giant_punch_fix_1
+        lineinfile.add_line_to_file(
+            filepath="src/dkshared.asm",
+            line="\t"+"\n\t".join(self.char_proc.dk_giant_punch_defs),
+            inserter=lineinfile.AfterLast(
+                r".*beq\s*v0, at, check_action_giant_punch_.*")
+        )
+        # cpu_fix_2
+        lineinfile.add_line_to_file(
+            filepath="src/dkshared.asm",
+            line="\t"+"\n\t".join(self.char_proc.dk_cpu_fix_2_defs),
+            inserter=lineinfile.AfterLast(
+                r".*beq\s*v1, at, _cpu_2.*")
         )
 
         # Inject patches related to Kirby clones
