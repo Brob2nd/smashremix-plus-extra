@@ -330,6 +330,61 @@ class StageProcessor:
         return data
 
     @staticmethod
+    def _trim_ge_model(output_path, name, tbl_off, trim, footer_name):
+        """Mark-and-sweep <output_path>/<name>.bin (a GoldEditor self-relocating
+        model) down to the regions reachable from its roots, in place.
+
+        roots: `trim is True` -> the footer's DObjDesc (+ p_mobjsubs if present),
+        else `trim` is a list of explicit file offsets (int or hex str).
+
+        Also repoints the <name>_hitbox.bin footer's chain nodes into the new
+        file.  Returns the recompacted chain head as a hex string, for the
+        caller to pass as internal_file_table_offset.
+        """
+        from smashremix_extra import ge_bin
+
+        model_path = f"{output_path}/{name}.bin"
+        head = tbl_off if isinstance(tbl_off, int) else int(tbl_off, 16)
+        footer_path = (f"{output_path}/{footer_name}.bin"
+                       if footer_name else None)
+
+        if trim is True:
+            if not footer_path or not os.path.exists(footer_path):
+                raise ValueError(
+                    f"{name}: trim: true needs a footer: to root from")
+            fr = ge_bin.footer_roots(open(footer_path, "rb").read())
+            roots = [fr.dobjdesc]
+            if fr.pmobjsubs is not None:
+                roots.append(fr.pmobjsubs)
+        else:
+            roots = [x if isinstance(x, int) else int(x, 16) for x in trim]
+
+        res = ge_bin.gc(open(model_path, "rb").read(), roots, head=head)
+        open(model_path, "wb").write(res.data)
+
+        if footer_path and os.path.exists(footer_path):
+            fb = bytearray(open(footer_path, "rb").read())
+            fr = ge_bin.footer_roots(bytes(fb))
+            for node, old in ((fr.dd_node, fr.dobjdesc),
+                              (fr.pm_node, fr.pmobjsubs)):
+                if node is None:
+                    continue
+                new = res.remap.get(old)
+                if new is None:
+                    raise ValueError(
+                        f"{name}: {footer_name} points at 0x{old:X}, which the "
+                        f"trim dropped - add it as an explicit trim root")
+                ge_bin.w16(fb, node + 2, new // 4)
+            open(footer_path, "wb").write(fb)
+
+        logger.info("%s: trimmed %d -> %d B, chain head 0x%X -> 0x%X",
+                    name, res.old_len, res.new_len, head, res.new_head)
+        for line in res.report:
+            if line.startswith("WARNING"):
+                logger.warning("%s: %s", name, line)
+        return f"{res.new_head:X}"
+
+    @staticmethod
     def _model_offsets(output_path, name, footer_name):
         """{const_name: offset} of interesting spots inside a GE model .bin
         (empty for non-GE files). `footer_name` = the _hitbox.bin whose footer
@@ -397,13 +452,25 @@ class StageProcessor:
                 continue
             # [name, tableOffset, resourceOffset, {opts}]; resourceOffset
             # defaults to "3FFFC" (empty resource list) for self-contained model
-            # bins. opts: {footer: <name>} names the <name>_hitbox.bin whose
-            # ITAttributes footer targets this model (so the MObjSub / sprite
-            # offsets can be resolved for the FILES.<NAME>.* constants).
+            # bins. opts:
+            #   footer: <name>   the <name>_hitbox.bin whose ITAttributes footer
+            #                    targets this model (lets the MObjSub / sprite
+            #                    offsets resolve for the FILES.<NAME>.* constants)
+            #   trim: true|[roots]  mark-and-sweep the GE model down to what the
+            #                    footer's DObjDesc (trim: true) or the given root
+            #                    offset(s) reach, dropping leftover GoldEditor
+            #                    objects/textures.  Runs on the build copy before
+            #                    the file is registered; repoints the footer and
+            #                    uses the recompacted chain head as tableOffset,
+            #                    so the config keeps the ORIGINAL (pre-trim) one.
             name = entry[0]
             tbl_off = entry[1] if len(entry) > 1 else "3FFFC"
             res_off = entry[2] if len(entry) > 2 else "3FFFC"
             opts = entry[3] if len(entry) > 3 and isinstance(entry[3], dict) else {}
+
+            if opts.get("trim"):
+                tbl_off = self._trim_ge_model(
+                    output_path, name, tbl_off, opts["trim"], opts.get("footer"))
 
             reqlist_path = f"{original_path}/{name}_reqlist.txt"
             has_reqlist = os.path.exists(reqlist_path)
