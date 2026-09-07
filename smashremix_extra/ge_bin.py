@@ -252,6 +252,38 @@ def footer_roots(footer_bytes):
     return Footer(dd, pm, dd_node, pm_node, ch)
 
 
+def resolve_trim_roots(d, trim, footer_bytes=None):
+    """Root offsets for gc(), from a ``trim:`` config value:
+
+      True            the footer's DObjDesc entry, plus p_mobjsubs if it has
+                      one. Needs ``footer_bytes``. Only this form picks up
+                      p_mobjsubs; a model whose footer sets it needs this or
+                      the trim drops reachable data.
+      {objects: [n]}  ``find_objects(d)`` indices; negative allowed. No
+                      p_mobjsubs.
+      [off, ...]      explicit offsets, int or hex string.
+    """
+    if trim is True:
+        if footer_bytes is None:
+            raise ValueError("trim: true needs a footer: to root from")
+        fr = footer_roots(footer_bytes)
+        roots = [fr.dobjdesc]
+        if fr.pmobjsubs is not None:
+            roots.append(fr.pmobjsubs)
+        return roots
+    if isinstance(trim, dict) and "objects" in trim:
+        objs = find_objects(d)
+        idxs = trim["objects"]
+        idxs = idxs if isinstance(idxs, list) else [idxs]
+        try:
+            return [objs[i].start + 0x10 for i in idxs]
+        except IndexError:
+            raise ValueError(
+                f"trim: objects: index out of range - file has {len(objs)} "
+                f"object(s) (indices 0..{len(objs) - 1}, or negative)")
+    return [x if isinstance(x, int) else int(x, 16) for x in trim]
+
+
 # ------------------------------------------------------------- garbage collector
 GcResult = namedtuple(
     "GcResult",
