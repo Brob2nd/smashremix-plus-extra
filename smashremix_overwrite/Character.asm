@@ -725,7 +725,6 @@ scope Character {
         global evaluate {name}_new_actions({{name}_new_actions} + 1)
     }
 
-
     // @ Description
     // Copies menu actions from a base character to a target character.
     // base - character to copy actions from
@@ -1295,7 +1294,6 @@ scope Character {
             fill    jab_3.ENABLED - pc()    // nop the rest of the original logic
         }
 
-
         // @ Description
         // modifies a hard-coded routine which runs when the character initiates a rapid jab, and
         // determines which action ID will be loaded
@@ -1773,7 +1771,6 @@ scope Character {
             OS.patch_end()
         }
 
-
         // @ Description
         // modifies a hard-coded routine which seemingly runs when an AI switches behaviours?
         // the table contains pointers to what seems to be a struct for determining how the AI will
@@ -1792,7 +1789,6 @@ scope Character {
             OS.patch_start(0xADB80,0x80133140)
             lw      s2, LOWER(s2)           // original line (modified)
             OS.patch_end()
-
         }
 
         // @ Description
@@ -1829,7 +1825,6 @@ scope Character {
             }
             addu    at, at, t8              // original line 4
             lw      t8, LOWER(at)           // original line 5 (modified)
-
         }
 
         // @ Description
@@ -2012,7 +2007,7 @@ scope Character {
          scope falcon_dive_y_fix_: {
             OS.patch_start(0xC7C08, 0x8014D1C8)
             j   falcon_dive_y_fix_
-           nop
+            nop
             _return:
             OS.patch_end()
 
@@ -2552,7 +2547,7 @@ scope Character {
         db  id.NONE;    db  id.NCAPTAIN; db  id.JFALCON;db  id.NONE        // 0x07 - CAPTAIN
         db  id.NONE;    db  id.NKIRBY;   db  id.JKIRBY; db  id.NONE        // 0x08 - KIRBY
         db  id.NONE;    db  id.NPIKACHU; db  id.JPIKA;  db  id.EPIKA       // 0x09 - PIKACHU
-        db  id.NONE;    db  id.NJIGGLY;  db  id.JPUFF;  db  id.EPUFF       // 0x0A - JIGGLY
+        db  id.SANDBAG; db  id.NJIGGLY;  db  id.JPUFF;  db  id.EPUFF       // 0x0A - JIGGLY
         db  id.NONE;    db  id.NNESS;    db  id.JNESS;  db  id.NONE        // 0x0B - NESS
         db  id.NONE;    db  id.NONE;     db  id.NONE;   db  id.NONE        // 0x0C - BOSS
         db  id.NONE;    db  id.NONE;     db  id.NONE;   db  id.NONE        // 0x0D - METAL
@@ -2917,7 +2912,6 @@ scope Character {
         dw Character.id.{name}
         OS.patch_end()
     }
-
 
     // @ Description
     // Jump table for Lvl 10 cpus to use instead of rolling
@@ -3654,18 +3648,18 @@ scope Character {
     db Stages.id.BTT_NESS                // NESS
     db Stages.id.BTT_STG1                // MASTERHAND
     db Stages.id.BTT_MARIO               // METAL MARIO
-    db Stages.id.BTT_STG1            // NMARIO
-    db Stages.id.BTT_STG1            // NFOX
-    db Stages.id.BTT_STG1            // NDONKEY
-    db Stages.id.BTT_STG1            // NSAMUS
-    db Stages.id.BTT_STG1            // NLUIGI
-    db Stages.id.BTT_STG1            // NLINK
-    db Stages.id.BTT_STG1            // NYOSHI
-    db Stages.id.BTT_STG1            // NCAPTAIN
-    db Stages.id.BTT_STG1            // NKIRBY
-    db Stages.id.BTT_STG1            // NPIKACHU
-    db Stages.id.BTT_STG1            // NJIGGLY
-    db Stages.id.BTT_STG1            // NNESS
+    db Stages.id.BTT_STG1                // NMARIO
+    db Stages.id.BTT_STG1                // NFOX
+    db Stages.id.BTT_STG1                // NDONKEY
+    db Stages.id.BTT_STG1                // NSAMUS
+    db Stages.id.BTT_STG1                // NLUIGI
+    db Stages.id.BTT_STG1                // NLINK
+    db Stages.id.BTT_STG1                // NYOSHI
+    db Stages.id.BTT_STG1                // NCAPTAIN
+    db Stages.id.BTT_STG1                // NKIRBY
+    db Stages.id.BTT_STG1                // NPIKACHU
+    db Stages.id.BTT_STG1                // NJIGGLY
+    db Stages.id.BTT_STG1                // NNESS
     db Stages.id.BTT_DONKEY_KONG         // GDONKEY
     db 0xFF                              // PLACEHOLDER
     db 0xFF                              // PLACEHOLDER
@@ -3725,18 +3719,18 @@ scope Character {
     db Stages.id.BTT_YL                  // NESS
     db Stages.id.BTT_STG1                // MASTERHAND
     db Stages.id.BTT_MARIO               // METAL MARIO
-    db Stages.id.BTT_STG1            // NMARIO
-    db Stages.id.BTT_STG1            // NFOX
-    db Stages.id.BTT_STG1            // NDONKEY
-    db Stages.id.BTT_STG1            // NSAMUS
-    db Stages.id.BTT_STG1            // NLUIGI
-    db Stages.id.BTT_STG1            // NLINK
-    db Stages.id.BTT_STG1            // NYOSHI
-    db Stages.id.BTT_STG1            // NCAPTAIN
-    db Stages.id.BTT_STG1            // NKIRBY
-    db Stages.id.BTT_STG1            // NPIKACHU
-    db Stages.id.BTT_STG1            // NJIGGLY
-    db Stages.id.BTT_STG1            // NNESS
+    db Stages.id.BTT_STG1                // NMARIO
+    db Stages.id.BTT_STG1                // NFOX
+    db Stages.id.BTT_STG1                // NDONKEY
+    db Stages.id.BTT_STG1                // NSAMUS
+    db Stages.id.BTT_STG1                // NLUIGI
+    db Stages.id.BTT_STG1                // NLINK
+    db Stages.id.BTT_STG1                // NYOSHI
+    db Stages.id.BTT_STG1                // NCAPTAIN
+    db Stages.id.BTT_STG1                // NKIRBY
+    db Stages.id.BTT_STG1                // NPIKACHU
+    db Stages.id.BTT_STG1                // NJIGGLY
+    db Stages.id.BTT_STG1                // NNESS
     db Stages.id.BTT_SAMUS               // GDONKEY
     db 0xFF                              // PLACEHOLDER
     db 0xFF                              // PLACEHOLDER
@@ -4057,6 +4051,7 @@ scope Character {
     define_character(NPEACH, FOX, File.NPEACH_MAIN, 0x0D0, 0, File.NPEACH_CHARACTER, File.PEACH_SHIELD_POSE, 0x0D2, File.PEACH_TURNIP_INFO, 0x0A1, 0x013C, 0x428, 0x0, OS.FALSE, OS.FALSE, Stages.id.BTT_STG1, Stages.id.BTP_POLY, Stages.id.BTT_STG1, Stages.id.BTP_POLY, sound_type.U, variant_type.POLYGON)
     // NCRASH
     define_character(NCRASH, MARIO, File.NCRASH_MAIN, 0x0CA, 0, File.NCRASH_CHARACTER, File.CRASH_SHIELD_POSE, 0x0CC,  File.CRASH_SPIN_GFX, File.CRASH_ENTRY, 0, 0x2C0, 9, OS.FALSE, OS.FALSE, Stages.id.BTT_STG1, Stages.id.BTP_POLY, Stages.id.BTT_STG1, Stages.id.BTP_POLY, sound_type.U, variant_type.POLYGON)
+    // remix polygon characters ids get automatically updated and incremented by 1 with every added remix non-polygon character
 
     print "========================================================================== \n"
     print "# Remix Fighters = "; print "0x"; OS.print_hex(NUM_REMIX_FIGHTERS); print " \n";
