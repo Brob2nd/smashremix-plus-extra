@@ -253,16 +253,8 @@ def footer_roots(footer_bytes):
 
 
 def resolve_trim_roots(d, trim, footer_bytes=None):
-    """Root offsets for gc(), from a ``trim:`` config value:
-
-      True            the footer's DObjDesc entry, plus p_mobjsubs if it has
-                      one. Needs ``footer_bytes``. Only this form picks up
-                      p_mobjsubs; a model whose footer sets it needs this or
-                      the trim drops reachable data.
-      {objects: [n]}  ``find_objects(d)`` indices; negative allowed. No
-                      p_mobjsubs.
-      [off, ...]      explicit offsets, int or hex string.
-    """
+    """gc() roots from a trim: value. True -> footer DObjDesc (+ p_mobjsubs);
+    {objects: [n]} -> find_objects() indices; [off, ...] -> raw offsets."""
     if trim is True:
         if footer_bytes is None:
             raise ValueError("trim: true needs a footer: to root from")
