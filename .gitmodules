@@ -1,5 +1,5 @@
 [submodule "smashremix"]
 	path = smashremix
-	url = https://github.com/Brob2nd/Smash-Remix-Debugged
+	url = https://github.com/Smash-Remix-Debugged/tree/extra
 	branch = master
 	ignore = dirty
