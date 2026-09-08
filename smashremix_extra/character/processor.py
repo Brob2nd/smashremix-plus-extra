@@ -1591,6 +1591,7 @@ class CharacterProcessor:
                 data[attr_offset+sound_pos:attr_offset +
                      sound_pos+2] = bytes.fromhex(sfx)
 
+        # f32 fields
         attr_values = {
             "size_multi": 0x0,
             "walk_1_cycle": 0x04,
@@ -1616,7 +1617,6 @@ class CharacterProcessor:
             "gravity": 0x58,
             "max_fall_speed": 0x5C,
             "fast_fall_speed": 0x60,
-            "num_jumps": 0x64,
             "weight": 0x68,
             "jab_combo_frames": 0x6C,
             "dash_run_frames": 0x70,
@@ -1637,6 +1637,9 @@ class CharacterProcessor:
             "ledge_grab_y": 0xB0
         }
 
+        # s32 fields
+        attr_ints = {"num_jumps": 0x64}
+
         for attr_name, attr_pos in attr_values.items():
             if attr_name in config.get("attributes", {}):
                 print(attr_name, config.get("attributes").get(
@@ -1644,6 +1647,11 @@ class CharacterProcessor:
                 # Replace value in final data
                 data[attr_offset+attr_pos:attr_offset +
                      attr_pos+4] = bytes.fromhex(hex_util.float_to_ieee754_hex(config.get("attributes").get(attr_name)))
+
+        for attr_name, attr_pos in attr_ints.items():
+            if attr_name in config.get("attributes", {}):
+                struct.pack_into(">i", data, attr_offset + attr_pos,
+                                 int(config["attributes"][attr_name]))
 
         if config.get("attributes", {}).get("hurtboxes"):
             hurtboxes = config.get("attributes").get("hurtboxes")
@@ -1820,6 +1828,16 @@ class CharacterProcessor:
 
         with open(f"{output_path}/main.bin", 'wb') as binary_file:
             binary_file.write(data)
+
+        # Debug dump of the patched attributes
+        try:
+            from smashremix_extra.character import attributes as _char_attrs
+            _char_attrs.dump_to(f"{output_path}/character_attributes.yaml",
+                                data, attr_offset, attr_values, attr_ints,
+                                attr_sounds)
+        except Exception as _e:
+            logger.warning(
+                f"{character_folder}: character_attributes.yaml skipped ({_e})")
 
         # Check for sword trail definitions
         character_sword_trail_add_list = {}
