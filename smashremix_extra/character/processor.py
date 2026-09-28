@@ -11,6 +11,10 @@ from smashremix_extra.constants import (
     PRIMARY_MOVESETS, SHIELD_POSES, TWELVECB_DEFEAT, SP_DUO_POSES, SP_TEAM_POSES, COMMAND_SIZES, ExtraFile,
 )
 from smashremix_extra.image_appender import append_image, get_image_data, ImageMode
+from smashremix_extra.character.gen_datascreen import (
+    generate_name_image, generate_bio_image, generate_works_image,
+    generate_special_image, generate_blank_image,
+)
 from smashremix_extra.file_appender import append_file, get_pointer, update_pointer
 from smashremix_extra.rom_util import get_attrib_offset
 from smashremix_extra.file_manager import FileManager
@@ -41,12 +45,19 @@ class CharacterProcessor:
         self.characters_exist = characters_exist
         self.stage_ids = stage_ids
 
+        # scripts/10F5.bin (data-screen bios) overflows past a fixed
+        # 0x3FFFC-byte ceiling once enough characters are added. Extra
+        # files get created via _get_bio_overflow_path() as needed.
+        self.bio_overflow_paths = []
+        self.bio_overflow_names = []
+
         self.bonus_chars = []
         self.character_defs = []
         self.results_screen_defs = []
         self.add_to_css_strings = []
         self.victory_theme_strings = []
         self.singleplayer_additions = []
+        self.singleplayer_boss_name_defs = []
         self.singleplayer_name_width_defs = {
             "normal": [], "team": [], "giant": []
         }
@@ -57,6 +68,7 @@ class CharacterProcessor:
         self.character_series_textures = {}
         self.character_portrait_defs = []
         self.character_1p_icon_defs = []
+        self.character_boss_icon_defs = []
         self.character_1p_duo_parameter_defs = []
         self.character_1p_team_parameter_defs = []
         self.character_12cb_defs = []
@@ -110,6 +122,74 @@ class CharacterProcessor:
             return default
         return stage_id
 
+    @staticmethod
+    def _trim_ge_model(output_path, name, tbl_off, trim, footer_name):
+        """See StageProcessor._trim_ge_model."""
+        from smashremix_extra import ge_bin
+
+        model_path = f"{output_path}/{name}.bin"
+        head = tbl_off if isinstance(tbl_off, int) else int(tbl_off, 16)
+        footer_path = (f"{output_path}/{footer_name}.bin"
+                       if footer_name else None)
+
+        d0 = open(model_path, "rb").read()
+        footer_bytes = (open(footer_path, "rb").read()
+                        if footer_path and os.path.exists(footer_path) else None)
+        try:
+            roots = ge_bin.resolve_trim_roots(d0, trim, footer_bytes)
+        except ValueError as e:
+            raise ValueError(f"{name}: {e}") from e
+
+        res = ge_bin.gc(d0, roots, head=head)
+        open(model_path, "wb").write(res.data)
+
+        if footer_path and os.path.exists(footer_path):
+            fb = bytearray(open(footer_path, "rb").read())
+            fr = ge_bin.footer_roots(bytes(fb))
+            for node, old in ((fr.dd_node, fr.dobjdesc),
+                              (fr.pm_node, fr.pmobjsubs)):
+                if node is None:
+                    continue
+                new = res.remap.get(old)
+                if new is None:
+                    raise ValueError(
+                        f"{name}: {footer_name} points at 0x{old:X}, which "
+                        f"the trim dropped - add it as an explicit trim root")
+                ge_bin.w16(fb, node + 2, new // 4)
+            open(footer_path, "wb").write(fb)
+
+        saved = res.old_len - res.new_len
+        pct = 100 * saved / res.old_len if res.old_len else 0.0
+        logger.info(f"{name}: trimmed {res.old_len} -> {res.new_len} B "
+                    f"(-{saved} B, -{pct:.1f}%), chain head 0x{head:X} -> "
+                    f"0x{res.new_head:X}")
+        for line in res.report:
+            if line.startswith("WARNING"):
+                logger.warning(f"{name}: {line}")
+        return f"{res.new_head:X}"
+
+    def _get_bio_overflow_path(self, index: int) -> str:
+        """Path for bio overflow file `index` (0-based), creating and
+        registering it on first use."""
+        while len(self.bio_overflow_paths) <= index:
+            n = len(self.bio_overflow_paths) + 1
+            path = f"scripts/10F5_extra{n}.bin"
+            name = f"CHARACTER_BIOS_EXTENDED_EXTRA{n}"
+            stub = bytearray(b"\x00" * 0x18)
+            stub[0x0C:0x10] = b"\xFF\xFF\x00\x00"
+            with open(path, "wb") as f:
+                f.write(bytes(stub))
+            FileManager.add_file(
+                path=path,
+                name=name,
+                internal_file_table_offset=0x0C,
+                internal_file_resource_offset=0x3FFFC,
+                compression_level=2,
+            )
+            self.bio_overflow_paths.append(path)
+            self.bio_overflow_names.append(name)
+        return self.bio_overflow_paths[index]
+
     def process(self, character_folder: str) -> None:
         """Process one character folder and accumulate patch data into self."""
         print(f"== {character_folder} ==")
@@ -147,6 +227,18 @@ class CharacterProcessor:
         )
 
         filename_to_id = {}
+
+        # trim before the merge below reads the _hitbox footers it repoints
+        trimmed_heads = {}
+        for _entry in (config.get("files", []) or []) + \
+                (config.get("append_files", []) or []):
+            if not (isinstance(_entry, list) and len(_entry) > 3
+                    and isinstance(_entry[3], dict) and _entry[3].get("trim")):
+                continue
+            _opts = _entry[3]
+            trimmed_heads[_entry[0]] = self._trim_ge_model(
+                output_path, _entry[0], _entry[1], _opts["trim"],
+                _opts.get("footer"))
 
         main_file = FileManager.add_file(
             path=f"{output_path}/main.bin",
@@ -189,7 +281,8 @@ class CharacterProcessor:
                 reqlist_exists = False
 
                 for file_data in file:
-                    file_path = f"./{original_path}/{file_data[0]}.bin"
+                    # build copy - may be trimmed/repointed by the pre-pass
+                    file_path = f"{output_path}/{file_data[0]}.bin"
 
                     with open(file_path, 'rb') as _f:
                         data = bytearray(_f.read())
@@ -297,12 +390,13 @@ class CharacterProcessor:
                     ExtraFile(merged_filename, index, file[0][1], file[0][2], file_id))
                 filename_to_id[merged_filename] = file_id
             else:
+                tbl_off = trimmed_heads.get(file[0], file[1])
                 file_id = character_file.id + \
                     1 + len(extra_files_to_add)
                 extra_files_str.append(
                     hex(file_id))
                 extra_files_to_add.append(
-                    ExtraFile(file[0], index, file[1], file[2], file_id))
+                    ExtraFile(file[0], index, tbl_off, file[2], file_id))
                 filename_to_id[file[0]] = file_id
 
         append_files_str = []
@@ -312,12 +406,13 @@ class CharacterProcessor:
             if isinstance(file, str):
                 append_files_str.append(file)
             else:
+                tbl_off = trimmed_heads.get(file[0], file[1])
                 file_id = character_file.id + 1 + \
                     len(extra_files_to_add)+len(append_files)
                 append_files_str.append(
                     hex(file_id))
                 append_files.append(
-                    ExtraFile(file[0], index, file[1], file[2], file_id))
+                    ExtraFile(file[0], index, tbl_off, file[2], file_id))
                 filename_to_id[file[0]] = file_id
 
         shield_pose_int_id = None
@@ -644,6 +739,24 @@ class CharacterProcessor:
         self.singleplayer_additions.append(
             f'add_to_single_player(Character.id.{character_folder.upper()}, {name_texture_sp}, {name_delay_sp})')
 
+            # Check for Boss name texture and use if found
+        if os.path.exists(f"{output_path}/nameplate_boss.png"):
+            pixels, w, h = get_image_data(
+                f"{output_path}/nameplate_boss.png"
+            )
+            name_texture_boss_sp = append_image(
+                "scripts/000C.bin",
+                "scripts/000C.bin",
+                pixels,
+                w, h,
+                ImageMode.I8
+            )
+            name_texture_boss_sp = f"0x{name_texture_boss_sp:08X}"
+
+        if os.path.exists(f"{output_path}/nameplate_boss.png"):
+            self.singleplayer_boss_name_defs.append(
+                f'constant {character_folder.upper()}_BOSS({name_texture_boss_sp})')
+
         # Use alternate width for character's 1P name texture if defined
         alt_name_width = sp_config.get("alt_name_width", None)
         alt_name_width_team = sp_config.get(
@@ -692,6 +805,26 @@ class CharacterProcessor:
             f"constant {character_folder.upper()}({icon_offset})")
 
         singleplayer_icon = f"progress_icon.{character_folder.upper()}"
+
+        # Check for Boss icon and use if found
+        if os.path.isfile(f"{output_path}/boss_icon.png"):
+            pixels, w, h = get_image_data(
+                f"{output_path}/boss_icon.png"
+            )
+            icon_boss_offset = append_image(
+                "scripts/000B.bin",
+                "scripts/000B.bin",
+                pixels,
+                w, h,
+                ImageMode.RGBA5551
+            )
+            icon_boss_offset = f"0x{icon_boss_offset:X} + 0x10"
+
+        if os.path.isfile(f"{output_path}/boss_icon.png"):
+            self.character_boss_icon_defs.append(
+                f"constant {character_folder.upper()}_BOSS({icon_boss_offset})")
+
+            singleplayer_boss_icon = f"progress_icon.{character_folder.upper()}_BOSS"
 
         # Remix 1P Character Battle versus parameters
         if config.get("definitions", {}).get("variant_type", "SPECIAL") == "NA":
@@ -746,6 +879,23 @@ class CharacterProcessor:
 
         self.character_1p_team_parameter_defs.append(
             f"add_team_parameters({anim}, {moveset}, {flags}) // {character_folder.upper()}")
+
+        if os.path.exists(f"./{output_path}/1p_p2.bin"):
+            victory_image_bottom = FileManager.add_file(
+                path=f"{output_path}/1p_p2.bin",
+                name=f"{character_folder.upper()}_VICTORY_IMAGE_BOTTOM",
+                internal_file_table_offset=config['singleplayer']['victory_image_bottom_offset'][0],
+                internal_file_resource_offset=config['singleplayer']['victory_image_bottom_offset'][1],
+                compression_level=2
+            )
+
+            victory_image_top = FileManager.add_file(
+                path=f"{output_path}/1p_p1.bin",
+                name=f"{character_folder.upper()}_VICTORY_IMAGE_TOP",
+                internal_file_table_offset=config['singleplayer']['victory_image_top_offset'][0],
+                internal_file_resource_offset=config['singleplayer']['victory_image_top_offset'][1],
+                compression_level=2
+            )
 
         # Get series to use for character
         series_css = config.get("definitions", {}).get(
@@ -1049,6 +1199,63 @@ class CharacterProcessor:
         if jab_char == "CAPTAIN":
             jab_char = "FALCON"
 
+        # Generate data screen textures into the build output for characters without pre-drawn PNGs
+        data_screen_cfg = config.get("data_screen", {})
+        if data_screen_cfg:
+            os.makedirs(f"{output_path}/datascreen", exist_ok=True)
+
+            font_big = data_screen_cfg.get(
+                "font_big", "appender/extra_resources/font_big.ttf")
+            font_bio = data_screen_cfg.get(
+                "font_bio", "appender/extra_resources/fonts/bio")
+            font_works = data_screen_cfg.get(
+                "font_works", "appender/extra_resources/fonts/works")
+            font_specials = data_screen_cfg.get(
+                "font_specials", "appender/extra_resources/fonts/movenames")
+
+            display_name = data_screen_cfg.get(
+                "name", config.get("results", {}).get(
+                    "name", character_folder))
+            bio_text = data_screen_cfg.get("bio")
+            works_cfg = data_screen_cfg.get("works")
+            specials_cfg = data_screen_cfg.get("specials", {})
+
+            if not os.path.exists(f"{output_path}/datascreen/name.png"):
+                generate_name_image(
+                    display_name, font_big,
+                    f"{output_path}/datascreen/name.png")
+
+            if bio_text and not os.path.exists(
+                    f"{output_path}/datascreen/bio.png"):
+                generate_bio_image(
+                    bio_text, font_bio, f"{output_path}/datascreen/bio.png")
+
+            if works_cfg and not os.path.exists(
+                    f"{output_path}/datascreen/works.png"):
+                generate_works_image(
+                    works_cfg, font_works,
+                    f"{output_path}/datascreen/works.png")
+
+            for special_name, cfg_key in (
+                ("special_u", "usp"),
+                ("special_n", "nsp"),
+                ("special_d", "dsp"),
+            ):
+                path = f"{output_path}/datascreen/{special_name}.png"
+                move_text = specials_cfg.get(cfg_key)
+                if move_text and not os.path.exists(path):
+                    generate_special_image(move_text, font_specials, path)
+
+            for blank_name, dims in (
+                ("works", (160, 32)),
+                ("special_u", (64, 7)),
+                ("special_n", (64, 7)),
+                ("special_d", (64, 7)),
+            ):
+                path = f"{output_path}/datascreen/{blank_name}.png"
+                if not os.path.exists(path):
+                    generate_blank_image(path, *dims)
+
         # Check for Data screen textures (bio, name, works, specials)
         if os.path.exists(f"{output_path}/datascreen/bio.png"):
             # Bios are stored as three stacked I4 strips (51 + 51 + 13 rows);
@@ -1057,14 +1264,29 @@ class CharacterProcessor:
             pixels, w, h = get_image_data(
                 f"{output_path}/datascreen/bio.png", 160, 115
             )
-            bio_texture = append_image(
-                "scripts/10F5.bin",
-                "scripts/10F5.bin",
-                pixels,
-                w, h,
-                ImageMode.I4,
-            )
-            bio_texture += 0x80000000
+            # 10F5.bin overflows past enough characters - write to
+            # overflow file (flag 0x81, 0x82, ...) instead of 10F5.bin
+            # (flag 0x80).
+            try:
+                bio_texture = append_image(
+                    "scripts/10F5.bin",
+                    "scripts/10F5.bin",
+                    pixels,
+                    w, h,
+                    ImageMode.I4,
+                )
+                bio_texture += 0x80000000
+            except ValueError:
+                index = 0
+                while True:
+                    path = self._get_bio_overflow_path(index)
+                    try:
+                        bio_texture = append_image(
+                            path, path, pixels, w, h, ImageMode.I4)
+                        bio_texture += (0x81 + index) << 24
+                        break
+                    except ValueError:
+                        index += 1
             bio_texture = f"0x{bio_texture:08X}"
 
         if os.path.exists(f"{output_path}/datascreen/name.png"):
@@ -1530,6 +1752,7 @@ class CharacterProcessor:
                 data[attr_offset+sound_pos:attr_offset +
                      sound_pos+2] = bytes.fromhex(sfx)
 
+        # f32 fields
         attr_values = {
             "size_multi": 0x0,
             "walk_1_cycle": 0x04,
@@ -1555,7 +1778,6 @@ class CharacterProcessor:
             "gravity": 0x58,
             "max_fall_speed": 0x5C,
             "fast_fall_speed": 0x60,
-            "num_jumps": 0x64,
             "weight": 0x68,
             "jab_combo_frames": 0x6C,
             "dash_run_frames": 0x70,
@@ -1576,6 +1798,9 @@ class CharacterProcessor:
             "ledge_grab_y": 0xB0
         }
 
+        # s32 fields
+        attr_ints = {"num_jumps": 0x64}
+
         for attr_name, attr_pos in attr_values.items():
             if attr_name in config.get("attributes", {}):
                 print(attr_name, config.get("attributes").get(
@@ -1583,6 +1808,11 @@ class CharacterProcessor:
                 # Replace value in final data
                 data[attr_offset+attr_pos:attr_offset +
                      attr_pos+4] = bytes.fromhex(hex_util.float_to_ieee754_hex(config.get("attributes").get(attr_name)))
+
+        for attr_name, attr_pos in attr_ints.items():
+            if attr_name in config.get("attributes", {}):
+                struct.pack_into(">i", data, attr_offset + attr_pos,
+                                 int(config["attributes"][attr_name]))
 
         if config.get("attributes", {}).get("hurtboxes"):
             hurtboxes = config.get("attributes").get("hurtboxes")
@@ -1759,6 +1989,16 @@ class CharacterProcessor:
 
         with open(f"{output_path}/main.bin", 'wb') as binary_file:
             binary_file.write(data)
+
+        # Debug dump of the patched attributes
+        try:
+            from smashremix_extra.character import attributes as _char_attrs
+            _char_attrs.dump_to(f"{output_path}/character_attributes.yaml",
+                                data, attr_offset, attr_values, attr_ints,
+                                attr_sounds)
+        except Exception as _e:
+            logger.warning(
+                f"{character_folder}: character_attributes.yaml skipped ({_e})")
 
         # Check for sword trail definitions
         character_sword_trail_add_list = {}
