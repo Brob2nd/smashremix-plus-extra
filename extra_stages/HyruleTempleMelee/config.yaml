@@ -1,0 +1,29 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Hyrule Temple (Melee)"
+
+series: ZELDA
+
+sss_zoom: 0.2
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["C3C4", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: "HYRULE_TEMPLE"
+  occasional: ZELDA2_TEMPLE_8BIT
+  rare: "FIRE_EMBLEM"
+  rare2: "SKYWORLD"
+
+spawn_locations:
+  default:
+    p1: [-2799,0496]
+    p2: [2846,-6]
+    p3: [-647,2086]
+    p4: [665,-731]
+  neutral:
+    p1: [-2799,0496]
+    p2: [2846,-6]
+    p3: [-647,2086]
+    p4: [665,-731]

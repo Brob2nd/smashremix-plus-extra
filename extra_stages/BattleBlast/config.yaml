@@ -1,0 +1,27 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Battle Blast"
+
+sss_zoom: 0.27
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["556C", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: "REDIAL"
+  occasional: "GREENGARDEN"
+  rare: "BLUE_RESORT"
+  rare2: BOMBERMANDS_MULTIPLAYER_BATTLE
+
+spawn_locations:
+  default:
+    p1: [-2437,3526]
+    p2: [3002,3513]
+    p3: [-2868,4727]
+    p4: [2410,4730]
+  neutral:
+    p1: [-2437,3526]
+    p2: [3002,3513]
+    p3: [-2868,4727]
+    p4: [2410,4730]

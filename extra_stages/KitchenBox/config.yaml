@@ -1,0 +1,27 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Kitchen Box"
+
+series: WARIO
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["5354", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: "KITCHEN_ISLAND"
+  occasional: "WL2_PERFECT"
+  rare: "STARRING_WARIO"
+  rare2: "STONECARVING_CITY"
+
+spawn_locations:
+  default:
+    p1: [-2047,1171]
+    p2: [2346,1563]
+    p3: [-398,1554]
+    p4: [0912,0815]
+  neutral:
+    p1: [-2047,1171]
+    p2: [2346,1563]
+    p3: [-1995,232]
+    p4: [2316,-634]

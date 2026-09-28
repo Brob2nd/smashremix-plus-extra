@@ -1,0 +1,27 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Battlefield (Ultimate)"
+
+series: SMASH
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["2C3C", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: "BATTLEFIELD"
+  occasional: "BATTLEFIELDV2"
+  rare: "MULTIMAN"
+  rare2: BRAWL_CRUEL
+
+spawn_locations:
+  default:
+    p1: [-1262,752]
+    p2: [1262,752]
+    p3: [0000,1470]
+    p4: [0000,35]
+  neutral:
+    p1: [-1262,752]
+    p2: [1262,752]
+    p3: [-1262,35]
+    p4: [1262,35]

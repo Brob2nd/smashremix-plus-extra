@@ -1,0 +1,29 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Tower of Heaven (RoA)"
+
+series: TOH
+
+sss_zoom: 0.45
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["137C", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: "TOWEROFHEAVEN"
+  occasional: "PLANTATION"
+  rare: "FLANDRES_THEME"
+  rare2: "STRIKE_THE_EARTH"
+
+spawn_locations:
+  default:
+    p1: [-1495,0851]
+    p2: [1399,0851]
+    p3: [0000,1550]
+    p4: [0000,10]
+  neutral:
+    p1: [-1495,0851]
+    p2: [1399,0851]
+    p3: [-1495,10]
+    p4: [1399,10]

@@ -1,0 +1,27 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Dr. Mario (NES)"
+
+series: DR_MARIO
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["365C", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: "DR_MARIO"
+  occasional: "CHILL"
+  rare: "QUEQUE"
+  rare2: "LIPS_THEME"
+
+spawn_locations:
+  default:
+    p1: [-1637,1040]
+    p2: [1661,1040]
+    p3: [-1637,100]
+    p4: [1661,100]
+  neutral:
+    p1: [-1637,1040]
+    p2: [1661,1040]
+    p3: [-1637,100]
+    p4: [1661,100]

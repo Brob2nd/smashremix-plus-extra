@@ -1,0 +1,12 @@
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${BACKGROUND}
+009A Yoshi's Island File 2
+END OF REQ LIST

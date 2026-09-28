@@ -1,0 +1,31 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Peach's Castle (Melee)"
+
+series: MARIO_BROS
+
+hazard_type: "MOVEMENT" # Options: NONE, HAZARDS, MOVEMENT, BOTH
+
+sss_zoom: 0.4
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["4648", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: SM64_CASTLEWALL
+  occasional: "PEACH_CASTLE"
+  rare: SM64_METAL_CAP
+  rare2: "SMB3OVERWORLD"
+
+spawn_locations:
+  default:
+    p1: [-2758,97]
+    p2: [3423,97]
+    p3: [-1489,97]
+    p4: [1898,97]
+  neutral:
+    p1: [-2758,97]
+    p2: [3423,97]
+    p3: [-1489,97]
+    p4: [1898,97]

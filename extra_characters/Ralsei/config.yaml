@@ -1,0 +1,77 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+offsets:
+  main: ["00EC", "0000"]
+  character: ["0008", "3FFFC"]
+
+definitions:
+  base_character: LUIGI
+  series_logo_css: DELTARUNE
+  select_pose: 1
+
+name: "Ralsei"
+
+num_costumes: 4
+
+charge_smash_frames:
+  up: 3
+  forward: 8
+  down: 4
+
+results:
+  name: "Ralsei"
+  name_scale: 0.93
+  name_x: 25
+  wins_x: 180
+
+12cb:
+  moveset: "defeated_moveset_mario"
+
+# Files 6, 7, 8, 9
+# [Filename (without .bin), InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+files: ["0x0", "0x0", "0x0", "0x0"]
+
+singleplayer:
+  alt_name_width: 32
+
+data_screen:
+  name_x: 20
+  name_y: 50
+
+sounds:
+  "057B": ANNOUNCERRAL
+  "057C": RALGENONE
+  "057D": RALGENTWO
+  "057E": RALGENTHREE
+  "057F": RALLIFT
+  "0581": DOUBLEJUMPRAL
+  "0582": HURTRAL
+  "0583": CHANT
+  "0584": JUMPRAL
+  "0585": RALKO
+  "0586": STARKORAL
+  "0587": RALAPPEARXD
+  "058A": TORNADORAL
+  "058B": RALDORMIDO
+  "058C": RALCANTANDO
+  "058D": RALULTRAJUMP
+
+announcer_fgm: "057B"
+
+sounds_special:
+  "0583":
+    fgm_type: CHANT
+    length: 280
+  "058B":
+    fgm_type: SLEEP
+    length: "0x120"
+
+attributes:
+  dash_speed: 58.000
+  run_speed: 55.000
+  death_fgm: "0585"
+  star_ko_fgm: "0586"
+  damaged_fgm: "0582"
+  attack_sfx_1: "057C"
+  attack_sfx_2: "057D"
+  attack_sfx_3: "057E"
+  heavy_lift_fgm: "057F"

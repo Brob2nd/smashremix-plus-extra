@@ -1,0 +1,74 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+offsets:
+  main: ["0114", "0000"]
+  character: ["0004", "B5C4"]
+  
+definitions:
+  base_character: MARIO
+  series_logo_css: MARIO_BROS
+  series_logo_model: MARIO_BROS
+  select_pose: 1
+  break_the_targets: MARIO
+  board_the_platforms: MARIO
+
+singleplayer:
+  stage1: "PEACH2"
+  stage2: "COOLCOOL"
+  stage3: "BOWSERB"
+  # Game will crash if it can't find a unique stage
+  # (i.e. not used prior to character being rolled)
+  # from the stage list during initial 1P setup
+
+name: "SM64 Mario"
+
+num_costumes: 5
+
+12cb:
+  moveset: "defeated_moveset_mario"
+
+charge_smash_frames:
+  up: 2
+  forward: 9
+  down: 5
+
+files: [
+  "0x0",
+  "0x0",
+  "0x0",
+  "0x0"
+]
+
+results:
+  name: "Mario"
+  name_scale: 1.0
+  name_x: 20
+  wins_x: 185
+
+sounds:
+  "0867": DAMAGE
+  "4990": LETS_GO
+  "4991": MAMMA_MIA
+  "4993": YAHH
+  "4994": WA
+  "4995": HOO
+  "4996": WAAAOOOW
+  "4997": JUMPHOO
+  "4998": HOOHOO
+  "4999": YAHOO
+  "499A": POING
+  "499B": YIPPEE
+  "499C": ITS_ME
+  "499D": WAHAA
+  "499E": HERE_WE_GO
+  "499F": UH
+  "4992": HRMM
+
+announcer_fgm: "499C"
+
+attributes:
+  size_multi: 1.27
+  death_fgm: "4991"
+  star_ko_fgm: "4996"
+  damaged_fgm: "0867"
+  heavy_lift_fgm: "0867"
+  shield_size: 300.000

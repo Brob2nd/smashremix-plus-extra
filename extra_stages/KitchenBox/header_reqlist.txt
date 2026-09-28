@@ -1,0 +1,10 @@
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${STAGE}
+${BACKGROUND}
+009C Peach's Castle File 2
+END OF REQ LIST

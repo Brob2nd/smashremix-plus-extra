@@ -1,0 +1,48 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+offsets:
+  main: ["0114", "0000"]
+  character: ["0008", "733C"]
+  
+definitions:
+  base_character: MARIO
+  series_logo_css: REMIX
+  series_logo_model: REMIX
+  select_pose: 2
+  break_the_targets: MARIO
+  board_the_platforms: MARIO
+
+singleplayer:
+  stage1: "GOOMBA_ROAD"
+  stage2: "BOWSERS_KEEP"
+  stage3: "RAIDBLUE"
+  # Game will crash if it can't find a unique stage
+  # (i.e. not used prior to character being rolled)
+  # from the stage list during initial 1P setup
+
+name: "Matrix Mario"
+
+num_costumes: 5
+
+12cb:
+  moveset: "defeated_moveset_mario"
+
+charge_smash_frames:
+  up: 2
+  forward: 9
+  down: 5
+
+files: [
+  "0x0",
+  "0x0",
+  "0x0",
+  "0x0"
+]
+
+results:
+  name: "Matrix Mario"
+  name_scale: 0.50
+  name_x: 20
+  wins_x: 185
+
+sounds:
+  "0587": YAHOO

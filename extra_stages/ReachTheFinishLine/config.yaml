@@ -1,0 +1,31 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Reach the Finish Line"
+
+series: FZERO
+
+sss_zoom: 0.28
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["8714", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+magnifying_glass_color: [80, 96, 248] # Either HTML color or [R, G, B]
+
+music:
+  main: "BIG_BLUE"
+  occasional: "FZEROX_MEDLEY"
+  rare: "FZERO_CLIMBUP"
+  rare2: "MACHRIDER"
+
+spawn_locations:
+  default:
+    p1: [-3780,2003]
+    p2: [5125,1488]
+    p3: [-1740,1133]
+    p4: [3489,604]
+  neutral:
+    p1: [-3780,2003]
+    p2: [5125,1488]
+    p3: [-1740,1133]
+    p4: [3489,604]

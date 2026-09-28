@@ -1,0 +1,29 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Yoshi's Story (Melee)"
+
+series: YOSHI
+
+hazard_type: "MOVEMENT" # Options: NONE, HAZARDS, MOVEMENT, BOTH
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["8D4C", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: "YOSHI_TALE"
+  occasional: "OBSTACLE"
+  rare: "BABY_BOWSER"
+  rare2: "YOSHI_SKA"
+
+spawn_locations:
+  default:
+    p1: [1594,0900]
+    p2: [-1594,0900]
+    p3: [0000,35]
+    p4: [0000,1580]
+  neutral:
+    p1: [-1594,0900]
+    p2: [1594,0900]
+    p3: [-1594,0000]
+    p4: [1594,0900]

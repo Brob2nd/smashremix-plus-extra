@@ -1,0 +1,29 @@
+# [InternalFileTableOffsetBytes, InternalFileResourceOffsetBytes]
+name: "Smashville (Brawl)"
+
+series: ANIMAL_CROSSING
+
+hazard_type: "MOVEMENT" # Options: NONE, HAZARDS, MOVEMENT, BOTH
+
+offsets:
+  header: ["0098", "0014"]
+  stage: ["5908", "3FFFC"]
+  background: ["269D0", "3FFFC"]
+
+music:
+  main: "AC_TITLE"
+  occasional: "KK_RIDER"
+  rare: "SMASHVILLE"
+  rare2: "BALLOONFIGHT"
+
+spawn_locations:
+  default:
+    p1: [-1500,35]
+    p2: [1500,35]
+    p3: [-0800,35]
+    p4: [0800,35]
+  neutral:
+    p1: [-1500,35]
+    p2: [1500,35]
+    p3: [-0800,35]
+    p4: [0800,35]
