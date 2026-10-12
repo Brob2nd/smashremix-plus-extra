@@ -15,6 +15,7 @@ from smashremix_extra.character.gen_datascreen import (
     generate_name_image, generate_bio_image, generate_works_image,
     generate_special_image, generate_blank_image,
 )
+from smashremix_extra.character.gen_victory_image import generate_victory_images
 from smashremix_extra.file_appender import append_file, get_pointer, update_pointer
 from smashremix_extra.rom_util import get_attrib_offset
 from smashremix_extra.file_manager import FileManager
@@ -72,6 +73,8 @@ class CharacterProcessor:
         self.character_1p_duo_parameter_defs = []
         self.character_1p_team_parameter_defs = []
         self.character_12cb_defs = []
+        self.ending_image_defs = []
+        self.gallery_entries = []
         self.character_tag_team_preloads = []
         self.character_data_screen_defs = []
         self.character_data_screen_order = []
@@ -880,21 +883,34 @@ class CharacterProcessor:
         self.character_1p_team_parameter_defs.append(
             f"add_team_parameters({anim}, {moveset}, {flags}) // {character_folder.upper()}")
 
-        if os.path.exists(f"./{output_path}/1p_p2.bin"):
+        # 1P clear image: generate top (1p_p1.bin) and bottom (1p_p2.bin)
+        # victory image files from a single 300x220 1p_clear.png
+        if os.path.isfile(f"{output_path}/1p_clear.png"):
+            reloc_offset = generate_victory_images(
+                f"{output_path}/1p_clear.png",
+                f"{output_path}/1p_p1.bin",
+                f"{output_path}/1p_p2.bin"
+            )
+
             victory_image_bottom = FileManager.add_file(
                 path=f"{output_path}/1p_p2.bin",
                 name=f"{character_folder.upper()}_VICTORY_IMAGE_BOTTOM",
-                internal_file_table_offset=config['singleplayer']['victory_image_bottom_offset'][0],
-                internal_file_resource_offset=config['singleplayer']['victory_image_bottom_offset'][1],
+                internal_file_table_offset=reloc_offset,
+                internal_file_resource_offset=0x3FFFC,
                 compression_level=2
             )
 
             victory_image_top = FileManager.add_file(
                 path=f"{output_path}/1p_p1.bin",
                 name=f"{character_folder.upper()}_VICTORY_IMAGE_TOP",
-                internal_file_table_offset=config['singleplayer']['victory_image_top_offset'][0],
-                internal_file_resource_offset=config['singleplayer']['victory_image_top_offset'][1],
+                internal_file_table_offset=reloc_offset,
+                internal_file_resource_offset=0x3FFFC,
                 compression_level=2
+            )
+
+            self.ending_image_defs.append(
+                f"set_ending_image(Character.id.{character_folder.upper()}, "
+                f"File.{character_folder.upper()}_VICTORY_IMAGE_BOTTOM)"
             )
 
         # Get series to use for character
@@ -1126,6 +1142,15 @@ class CharacterProcessor:
         str_lx = config.get("results", {}).get("name_x", str_lx)
         str_scale = config.get("results", {}).get("name_scale", str_scale)
         victory_theme = config.get("results", {}).get("win_bgm", victory_theme)
+
+        # Add 1P clear image to the Gallery, using the victory theme as its
+        # BGM unless a list is given in singleplayer.gallery_bgm
+        if os.path.isfile(f"{output_path}/1p_clear.png"):
+            self.gallery_entries.append({
+                "character": character_folder.upper(),
+                "name": character_name.replace("\"", ""),
+                "bgm": sp_config.get("gallery_bgm", [victory_theme]),
+            })
 
         self.results_screen_defs.append(
             "add_to_results_screen("
