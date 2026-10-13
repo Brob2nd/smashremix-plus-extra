@@ -1064,6 +1064,17 @@ class CharacterAppender:
         add_to_label_on_empty("src/SinglePlayerModes.asm", "team_array",
                               self.char_proc.character_1p_team_parameter_defs)
 
+        # SinglePlayer.asm - 1P clear images
+        if self.char_proc.ending_image_defs:
+            lineinfile.add_line_to_file(
+                filepath="src/SinglePlayer.asm",
+                line="\t" + "\n\t".join(self.char_proc.ending_image_defs),
+                inserter=lineinfile.AfterLast(
+                    r".*set_ending_image\(Character\.id\..*")
+            )
+
+        self.add_gallery_entries(self.char_proc.gallery_entries)
+
         # TwelveCharBattle.asm
         lineinfile.add_line_to_file(
             filepath="src/TwelveCharBattle.asm",
@@ -1110,6 +1121,72 @@ class CharacterAppender:
                 line="\t\t"+"\n\t\t".join(char_fix["clear_asm"]),
                 inserter=lineinfile.BeforeLast(r".*_clear_kirby:*")
             )
+
+    def add_gallery_entries(self, entries):
+        """Appends characters' 1P clear images to the end of the Gallery."""
+        if not entries:
+            return
+
+        with open("src/Gallery.asm", 'r', encoding='utf-8') as f:
+            gallery = f.read()
+
+        size_match = re.search(r"constant id_table\.SIZE\((\d+)\)", gallery)
+        old_size = int(size_match.group(1))
+        new_size = old_size + len(entries)
+
+        gallery = gallery.replace(
+            size_match.group(0), f"constant id_table.SIZE({new_size})", 1)
+
+        # BGM arrays go after the last one (bgm_remix), before its OS.align
+        bgm_arrays = ""
+        for entry in entries:
+            bgm_arrays += f"\n    bgm_extra_{entry['character'].lower()}:\n"
+            bgm_arrays += f"    dh {len(entry['bgm'])}".ljust(44) + \
+                "// number of BGM\n"
+            bgm_arrays += "".join(f"    dh {bgm}\n" for bgm in entry['bgm'])
+        gallery = re.sub(
+            r"(\n    bgm_remix:\n(?:    dh .*\n)+)",
+            lambda m: m.group(1) + bgm_arrays, gallery, count=1)
+
+        gallery = re.sub(
+            r"(\n    dw bgm_remix.*\n)",
+            lambda m: m.group(1) + "".join(
+                f"    dw bgm_extra_{e['character'].lower()}".ljust(44) +
+                f"// {e['name']}\n" for e in entries),
+            gallery, count=1)
+
+        gallery = re.sub(
+            r"(\n    id_table:\n(?:.*\n)*?    db Character\.id\.BOSS\n)",
+            lambda m: m.group(1) + "".join(
+                f"    db Character.id.{e['character']}\n" for e in entries),
+            gallery, count=1)
+
+        with open("src/Gallery.asm", 'w', encoding='utf-8') as f:
+            f.write(gallery)
+
+        # Toggles.asm - names and index range for "View Gallery"
+        with open("src/Toggles.asm", 'r', encoding='utf-8') as f:
+            toggles = f.read()
+
+        toggles = re.sub(
+            r"(\n    string_table_gallery:\n(?:    dw .*\n)+)",
+            lambda m: m.group(1) + "".join(
+                f"    dw gallery_extra_{e['character'].lower()}\n" for e in entries),
+            toggles, count=1)
+
+        toggles = re.sub(
+            r'(\n    remix:; db "Remix", 0x00\n)',
+            lambda m: m.group(1) + "".join(
+                f"    gallery_extra_{e['character'].lower()}:; "
+                f"db \"{e['name']}\", 0x00\n" for e in entries),
+            toggles, count=1)
+
+        toggles = toggles.replace(
+            f"OS.FALSE, 0, {old_size - 1}, view_gallery,",
+            f"OS.FALSE, 0, {new_size - 1}, view_gallery,", 1)
+
+        with open("src/Toggles.asm", 'w', encoding='utf-8') as f:
+            f.write(toggles)
 
     def _patch_stage_asm(self):
         # Item.asm
