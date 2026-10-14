@@ -7,26 +7,74 @@ from PIL import Image, ImageDraw, ImageFont
 from smashremix_extra.character.bitmap_font import BitmapFont, wrap_bitmap_text
 
 
-def generate_name_image(name, font_path, output_file,
-                        width=112, height=40, margin=0, max_width_ratio=0.5):
-    image = Image.new("RGBA", (width, height), (0, 0, 0, 255))
-    font = ImageFont.truetype(font_path, height)
+# Name layout based on the vanilla data screen names
+NAME_CAP_HEIGHT = 40
+NAME_H_SCALE = 0.45
+NAME_MAX_HEIGHT = 79
+NAME_CENTER_X = 66
+# Name container bounds (the 2 line container is wider)
+NAME_LEFT = 20
+NAME_RIGHT = 106
+NAME_RIGHT_2_LINES = 115
+NAME_Y = 50
+NAME_Y_2_LINES = 48
 
-    # Crop tight to the glyphs' ink bounding box, then stretch that crop to
-    # fill the target box.
-    scratch = Image.new("RGBA", (width * 4, height * 2), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(scratch)
-    bbox = draw.textbbox((0, 0), name, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-    draw.text((-bbox[0], -bbox[1]), name, font=font, fill=(255, 255, 255, 255))
 
-    target_w = int((width - 2 * margin) * max_width_ratio)
-    if text_w > 0 and text_h > 0:
-        glyphs = scratch.crop((0, 0, text_w, text_h))
-        glyphs = glyphs.resize((target_w, height - 2 * margin), Image.LANCZOS)
-        image.alpha_composite(glyphs, (margin, margin))
-    image.save(output_file)
+def _render_name_line(text, font, cap, max_width):
+    top = font.getbbox("H")[1]
+    bbox = font.getbbox(text)
+    scratch = Image.new("L", (bbox[2] + 8, bbox[3] + cap), 0)
+    ImageDraw.Draw(scratch).text((4, -top), text, font=font, fill=255)
+    ink = scratch.getbbox()
+    line = scratch.crop((ink[0], 0, ink[2], max(cap, ink[3])))
+    # Squeeze horizontally, and more if the line is too wide
+    width = min(max_width, max(1, round(line.width * NAME_H_SCALE)))
+    return line.resize((width, line.height), Image.LANCZOS)
+
+
+def _render_name(lines, font_path, cap, max_width):
+    # Size the font so capitals are `cap` pixels tall
+    h_bbox = ImageFont.truetype(font_path, 100).getbbox("H")
+    font = ImageFont.truetype(font_path, round(cap * 100 / (h_bbox[3] - h_bbox[1])))
+    rendered = [_render_name_line(l, font, cap, max_width) for l in lines]
+
+    pitch = round((NAME_MAX_HEIGHT - NAME_CAP_HEIGHT) * cap / NAME_CAP_HEIGHT)
+    text_w = max(im.width for im in rendered)
+    height = max(im.height + i * pitch for i, im in enumerate(rendered))
+
+    # I4 rows must be multiples of 8 bytes
+    canvas = Image.new("L", (-(-text_w // 16) * 16, height), 0)
+    for i, im in enumerate(rendered):
+        canvas.paste(im, ((text_w - im.width) // 2, i * pitch), im)
+    return canvas, text_w
+
+
+def generate_name_image(name, font_path, output_file, scale_x=1.0):
+    """Returns the name's (x, y) on the data screen and its line count."""
+    lines = name if isinstance(name, list) else [name]
+    right = NAME_RIGHT if len(lines) == 1 else NAME_RIGHT_2_LINES
+    max_width = right - NAME_LEFT
+
+    canvas, text_w = _render_name(lines, font_path, NAME_CAP_HEIGHT, max_width)
+    # Shrink the whole name if it's too tall
+    if canvas.height > NAME_MAX_HEIGHT:
+        cap = NAME_CAP_HEIGHT * NAME_MAX_HEIGHT // canvas.height
+        canvas, text_w = _render_name(lines, font_path, cap, max_width)
+
+    x = round(NAME_CENTER_X - text_w / 2)
+    x = max(NAME_LEFT, min(x, right - text_w))
+    y = NAME_Y if len(lines) == 1 else NAME_Y_2_LINES
+
+    # Optional extra squeeze, keeping the name's left edge in place
+    if scale_x != 1.0:
+        text = canvas.crop((0, 0, text_w, canvas.height))
+        text = text.resize((max(1, round(text_w * scale_x)), canvas.height),
+                           Image.LANCZOS)
+        canvas = Image.new("L", (-(-text.width // 16) * 16, canvas.height), 0)
+        canvas.paste(text, (0, 0))
+
+    canvas.convert("RGBA").save(output_file)
+    return x, y, len(lines)
 
 
 def generate_bio_image(bio, font_path, output_file,

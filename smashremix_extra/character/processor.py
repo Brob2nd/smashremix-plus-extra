@@ -742,7 +742,7 @@ class CharacterProcessor:
         self.singleplayer_additions.append(
             f'add_to_single_player(Character.id.{character_folder.upper()}, {name_texture_sp}, {name_delay_sp})')
 
-            # Check for Boss name texture and use if found
+        # Check for Boss name texture and use if found
         if os.path.exists(f"{output_path}/nameplate_boss.png"):
             pixels, w, h = get_image_data(
                 f"{output_path}/nameplate_boss.png"
@@ -1226,6 +1226,9 @@ class CharacterProcessor:
 
         # Generate data screen textures into the build output for characters without pre-drawn PNGs
         data_screen_cfg = config.get("data_screen", {})
+        # Taller name box, used by multi-line names like "Captain/Falcon"
+        name_big_border = bool(
+            (data_screen_cfg or {}).get("name_big_border", False))
         if data_screen_cfg:
             os.makedirs(f"{output_path}/datascreen", exist_ok=True)
 
@@ -1246,9 +1249,15 @@ class CharacterProcessor:
             specials_cfg = data_screen_cfg.get("specials", {})
 
             if not os.path.exists(f"{output_path}/datascreen/name.png"):
-                generate_name_image(
+                gen_x, gen_y, name_lines = generate_name_image(
                     display_name, font_big,
-                    f"{output_path}/datascreen/name.png")
+                    f"{output_path}/datascreen/name.png",
+                    data_screen_cfg.get("name_scale_x", 1.0))
+                # Center the generated name like vanilla unless overridden
+                name_x = data_screen_cfg.get("name_x", gen_x)
+                name_y = data_screen_cfg.get("name_y", gen_y)
+                if name_lines > 1:
+                    name_big_border = True
 
             if bio_text and not os.path.exists(
                     f"{output_path}/datascreen/bio.png"):
@@ -1423,7 +1432,7 @@ class CharacterProcessor:
                 f"set_char_order({character_folder.upper()})"
             )
 
-        if config.get("data_screen", {}).get("name_big_border") == True:
+        if name_big_border:
             self.data_screen_big_border_defs.append(
                 f"addiu   at, r0, Character.id.{character_folder.upper()}  // at = Character ID"
                 f"\n\t\tbeq     v0, at, _large_border       // branch to use large border"
