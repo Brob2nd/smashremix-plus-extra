@@ -768,7 +768,7 @@ class CharacterProcessor:
             )
             name_texture_boss_sp = f"0x{name_texture_boss_sp:08X}"
 
-            self.singleplayer_boss_name_defs.append(
+            self.character_1p_boss_name_defs.append(
                 f'constant {character_folder.upper()}_BOSS({name_texture_boss_sp})')
 
         # Use alternate width for character's 1P name texture if defined
