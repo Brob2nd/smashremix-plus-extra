@@ -528,8 +528,9 @@ class CharacterAppender:
         # causing the malloc errors/instability with 4 players on the CSS at once.
         lineinfile.add_line_to_file(
             filepath="src/CharacterSelect.asm",
-            line="\t\t"+"\n\t\t".join(['slti    at, v0, dynamic_css.ACTIVE_HEAP_COUNT // at = 1 if v0 is still a real slot',
-                                       'beqz    at, _out_of_slots // if v0 ran past the real slots, stop and fall back instead of reading garbage']),
+            line="\t\t"+"\n\t\t".join([
+                'slti    at, v0, dynamic_css.ACTIVE_HEAP_COUNT // at = 1 if v0 is still a real slot',
+                'beqz    at, _out_of_slots // if v0 ran past the real slots, stop and fall back instead of reading garbage']),
             inserter=lineinfile.AfterFirst(
                 r'addiu\s+v0,\s*v0,\s*0x0001\s+// v0 = next heap slot')
         )
@@ -1012,14 +1013,22 @@ class CharacterAppender:
         # SinglePlayer.asm
         lineinfile.add_line_to_file(
             filepath="src/SinglePlayer.asm",
-            line="\t"+"\n\t".join(self.char_proc.singleplayer_additions),
-            inserter=lineinfile.AfterLast(r'^\s*add_to_single_player\(.*')
+            line="\t\t// Extra characters\n\t\t"+
+            "\n\t\t".join(self.char_proc.character_1p_name_defs),
+            inserter=lineinfile.BeforeFirst(r'.*// Duo Teams')
         )
 
         lineinfile.add_line_to_file(
             filepath="src/SinglePlayer.asm",
-            line="\t"+"\n\t".join(self.char_proc.singleplayer_boss_name_defs),
-            inserter=lineinfile.AfterLast(r'.*constant DK_CREW\(0x0000D890\).*')
+            line="\n\t\t// Extra bosses\n\t\t"+
+            "\n\t\t".join(self.char_proc.character_1p_boss_name_defs),
+            inserter=lineinfile.BeforeFirst(r'.*// Duo Teams')
+        )
+
+        lineinfile.add_line_to_file(
+            filepath="src/SinglePlayer.asm",
+            line="\t"+"\n\t".join(self.char_proc.singleplayer_additions),
+            inserter=lineinfile.AfterLast(r'^\s*add_to_single_player\(.*')
         )
 
         lineinfile.add_line_to_file(
@@ -1030,6 +1039,9 @@ class CharacterAppender:
             inserter=lineinfile.BeforeLast(
                 r'.*// use normal width otherwise.*')
         )
+
+        add_to_scope("src/SinglePlayer.asm", "name_delay",
+                     ["// Extra characters"] + self.char_proc.character_1p_delay_defs)
 
         # SinglePlayerModes.asm
         lineinfile.add_line_to_file(
@@ -1058,7 +1070,7 @@ class CharacterAppender:
         add_to_scope("src/SinglePlayerModes.asm", "progress_icon",
                      self.char_proc.character_1p_icon_defs)
         add_to_scope("src/SinglePlayerModes.asm", "progress_icon",
-                     self.char_proc.character_boss_icon_defs)
+                     self.char_proc.character_1p_boss_icon_defs)
         add_to_label_on_empty("src/SinglePlayerModes.asm", "duo_array",
                               self.char_proc.character_1p_duo_parameter_defs)
         add_to_label_on_empty("src/SinglePlayerModes.asm", "team_array",
