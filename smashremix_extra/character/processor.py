@@ -58,7 +58,6 @@ class CharacterProcessor:
         self.add_to_css_strings = []
         self.victory_theme_strings = []
         self.singleplayer_additions = []
-        self.singleplayer_boss_name_defs = []
         self.singleplayer_name_width_defs = {
             "normal": [], "team": [], "giant": []
         }
@@ -68,8 +67,11 @@ class CharacterProcessor:
         self.character_series_models = {}
         self.character_series_textures = {}
         self.character_portrait_defs = []
+        self.character_1p_name_defs = []
         self.character_1p_icon_defs = []
-        self.character_boss_icon_defs = []
+        self.character_1p_boss_icon_defs = []
+        self.character_1p_boss_name_defs = []
+        self.character_1p_delay_defs = []
         self.character_1p_duo_parameter_defs = []
         self.character_1p_team_parameter_defs = []
         self.character_12cb_defs = []
@@ -723,6 +725,9 @@ class CharacterProcessor:
 
                 name_delay_sp = f"0x{aifc_length:08X}"
 
+        self.character_1p_delay_defs.append(
+            f"constant {character_folder.upper()}({name_delay_sp})")
+
         # Check for 1P name texture and use if found
         name_texture_sp = "name_texture.MARIO"
 
@@ -739,8 +744,15 @@ class CharacterProcessor:
             )
             name_texture_sp = f"0x{name_texture_sp:08X}"
 
+        self.character_1p_name_defs.append(
+            f"constant {character_folder.upper()}({name_texture_sp})")
+
         self.singleplayer_additions.append(
-            f'add_to_single_player(Character.id.{character_folder.upper()}, {name_texture_sp}, {name_delay_sp})')
+            f"add_to_single_player("
+            f"Character.id.{character_folder.upper()}, "
+            f"name_texture.{character_folder.upper()}, "
+            f"name_delay.{character_folder.upper()})"
+        )
 
         # Check for Boss name texture and use if found
         if os.path.exists(f"{output_path}/nameplate_boss.png"):
@@ -756,12 +768,12 @@ class CharacterProcessor:
             )
             name_texture_boss_sp = f"0x{name_texture_boss_sp:08X}"
 
-        if os.path.exists(f"{output_path}/nameplate_boss.png"):
-            self.singleplayer_boss_name_defs.append(
+            self.character_1p_boss_name_defs.append(
                 f'constant {character_folder.upper()}_BOSS({name_texture_boss_sp})')
 
         # Use alternate width for character's 1P name texture if defined
-        alt_name_width = sp_config.get("alt_name_width", None)
+        alt_name_width = sp_config.get(
+            "alt_name_width", None)
         alt_name_width_team = sp_config.get(
             "alt_name_width_team", alt_name_width)
         alt_name_width_giant = sp_config.get(
@@ -814,18 +826,17 @@ class CharacterProcessor:
             pixels, w, h = get_image_data(
                 f"{output_path}/boss_icon.png"
             )
-            icon_boss_offset = append_image(
+            icon_offset = append_image(
                 "scripts/000B.bin",
                 "scripts/000B.bin",
                 pixels,
                 w, h,
                 ImageMode.RGBA5551
             )
-            icon_boss_offset = f"0x{icon_boss_offset:X} + 0x10"
+            icon_offset = f"0x{icon_offset:X} + 0x10"
 
-        if os.path.isfile(f"{output_path}/boss_icon.png"):
             self.character_boss_icon_defs.append(
-                f"constant {character_folder.upper()}_BOSS({icon_boss_offset})")
+                f"constant {character_folder.upper()}_BOSS({icon_offset})")
 
             singleplayer_boss_icon = f"progress_icon.{character_folder.upper()}_BOSS"
 
