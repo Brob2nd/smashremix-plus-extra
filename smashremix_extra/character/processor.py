@@ -835,7 +835,7 @@ class CharacterProcessor:
             )
             icon_offset = f"0x{icon_offset:X} + 0x10"
 
-            self.character_boss_icon_defs.append(
+            self.character_1p_boss_icon_defs.append(
                 f"constant {character_folder.upper()}_BOSS({icon_offset})")
 
             singleplayer_boss_icon = f"progress_icon.{character_folder.upper()}_BOSS"
