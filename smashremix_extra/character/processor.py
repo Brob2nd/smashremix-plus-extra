@@ -16,10 +16,15 @@ from smashremix_extra.character.gen_datascreen import (
     generate_special_image, generate_blank_image,
 )
 from smashremix_extra.character.gen_victory_image import generate_victory_images
+from smashremix_extra.character.gen_nameplate import (
+    generate_1p_name_image, generate_css_nameplate,
+    DEFAULT_1P_FONT, DEFAULT_CSS_FONT,
+)
 from smashremix_extra.file_appender import append_file, get_pointer, update_pointer
 from smashremix_extra.rom_util import get_attrib_offset
 from smashremix_extra.file_manager import FileManager
 from smashremix_extra.character.hurtbox import Hurtbox
+from smashremix_extra.character import hud_icons
 from smashremix_extra.smashremix.kirbyshared import kirby_shared, KirbyJumpConfig
 from smashremix_extra.logger import logger
 from smashremix_extra import hex_util, asm_util
@@ -172,6 +177,99 @@ class CharacterProcessor:
             if line.startswith("WARNING"):
                 logger.warning(f"{name}: {line}")
         return f"{res.new_head:X}"
+
+    @staticmethod
+    def _fix_logo_material_call(character_folder, logo):
+        """The logo's color comes from its material (per-player colors),
+        which the game applies through a display list call to segment 0x0E.
+        Some GEE imports leave that call out and only set a white prim color,
+        so the logo renders white. Replace that prim color with the call."""
+        material_call = bytes.fromhex("DE0000000E000000")
+        white_prim = bytes.fromhex("FA000000FFFFFFFF")
+        # DObjDesc display list pointer, 0x138 bytes before the end
+        dl = struct.unpack(">H", logo[-0x136:-0x134])[0] * 4
+        o = dl
+        while o + 8 <= len(logo):
+            cmd = logo[o:o + 8]
+            if cmd == material_call:
+                return
+            if cmd[0] == 0xDF:  # end of display list
+                break
+            o += 8
+        o = dl
+        while o + 8 <= len(logo) and logo[o] != 0xDF:
+            if logo[o:o + 8] == white_prim:
+                logo[o:o + 8] = material_call
+                logger.info(
+                    f"{character_folder}: series_logo.bin display list had "
+                    f"no material call; replaced the white prim color at "
+                    f"0x{o:X} with it so the logo uses the player colors")
+                return
+            o += 8
+        logger.warning(
+            f"{character_folder}: series_logo.bin has no material call and "
+            "no white prim color to replace; the logo may render white")
+
+    def _process_hud_icons(self, config, original_path, output_path,
+                           num_costumes):
+        """Replace the HUD emblem (hud.png) and stock icon
+        (stock_icon_<n>.png) in character.bin, rebuild the stock palette
+        array with one entry per costume when needed, and export the final
+        images into the build character folder.
+        Returns (HudIcons, array offset) for patch_main, or None."""
+        with open(f"{original_path}/main.bin", "rb") as f:
+            main = bytearray(f.read())
+        reqlist_path = f"{output_path}/main_reqlist.txt"
+        with open(reqlist_path, "r", encoding="utf-8") as f:
+            reqlist = f.readlines()
+
+        icons = hud_icons.HudIcons(
+            main, int(config["offsets"]["main"][0], 16),
+            int(config["offsets"]["main"][1], 16), reqlist)
+        if not icons.ok:
+            logger.warning(f"HUD icons skipped: {icons.reason}")
+            return None
+
+        char_path = f"{output_path}/character.bin"
+        with open(char_path, "rb") as f:
+            char = bytearray(f.read())
+        char_int = int(config["offsets"]["character"][0], 16)
+
+        if os.path.isfile(f"{original_path}/hud.png"):
+            hud_icons.replace_emblem(
+                icons, char, char_int, f"{original_path}/hud.png")
+
+        palettes = None
+        stock_paths = hud_icons.stock_icon_paths(original_path, num_costumes)
+        if stock_paths:
+            palettes = hud_icons.replace_stock_icon(
+                icons, char, char_int, stock_paths)
+
+        # Only rebuild the palette array when needed, so characters that
+        # already have one palette per costume keep their files untouched.
+        result = None
+        luts = icons.luts
+        if palettes is not None or num_costumes > len(icons.luts):
+            array, luts = hud_icons.build_palette_array(
+                icons, char, char_int, num_costumes, palettes)
+            with open(reqlist_path, "w", encoding="utf-8") as f:
+                f.writelines(hud_icons.insert_reqlist_entry(icons, reqlist))
+            result = (icons, array)
+
+        for lut, i, old in hud_icons.fix_transparent_colors(char, luts):
+            costumes = [c for c in range(num_costumes)
+                        if luts[c % len(luts)] == lut]
+            logger.info(
+                f"Stock icon: transparent color 0x{old:04X} -> 0x0000 "
+                f"(black) in palette 0x{lut:X} index {i}, "
+                f"costume(s) {costumes}")
+
+        with open(char_path, "wb") as f:
+            f.write(char)
+
+        hud_icons.extract(icons, char, output_path,
+                          num_costumes, luts)
+        return result
 
     def _get_bio_overflow_path(self, index: int) -> str:
         """Path for bio overflow file `index` (0-based), creating and
@@ -434,6 +532,12 @@ class CharacterProcessor:
                     1+len(extra_files_to_add)+len(append_files)+1
                 shield_pose_is_external = True
 
+        # HUD emblem + stock icon (both live in character.bin). Must run
+        # before the reqlist compile: it adds a ${CHARACTER} entry.
+        hud_palette_array = self._process_hud_icons(
+            config, original_path, output_path,
+            config.get("num_costumes", 8))
+
         # Compile reqlists
         reqlist_files = [_f for _f in os.listdir(
             f"./{output_path}/") if _f.endswith("reqlist.txt")]
@@ -614,6 +718,46 @@ class CharacterProcessor:
         skin_number = config.get("num_costumes", 8)
         self.character_skins.append(skin_number)
 
+        # Generate nameplate textures from text for any character without a
+        # hand-made PNG. Optional `nameplate:` keys (`nameplate: false`
+        # turns generation off and falls back to the default textures):
+        #   css / singleplayer: text to render, or false to skip
+        #     (both default to results.name, then name)
+        #   boss: text for nameplate_boss.png (only generated if set)
+        #   css_font / singleplayer_font: font file paths
+        #   singleplayer_max_width: 1P names wider than this get squeezed
+        #     (default 120; CSS names always squeeze to fit the 72px plate)
+        nameplate_cfg = config.get("nameplate", {})
+        generated_1p_width = None
+        if nameplate_cfg is not False:
+            nameplate_cfg = nameplate_cfg or {}
+            default_text = config.get("results", {}).get(
+                "name", character_name)
+
+            css_text = nameplate_cfg.get("css", default_text)
+            if css_text and not os.path.isfile(
+                    f"{output_path}/nameplate.png"):
+                generate_css_nameplate(
+                    css_text, f"{output_path}/nameplate.png",
+                    nameplate_cfg.get("css_font", DEFAULT_CSS_FONT))
+
+            sp_text = nameplate_cfg.get("singleplayer", default_text)
+            if sp_text and not os.path.isfile(
+                    f"{output_path}/nameplate_singleplayer.png"):
+                generated_1p_width = generate_1p_name_image(
+                    sp_text, f"{output_path}/nameplate_singleplayer.png",
+                    nameplate_cfg.get("singleplayer_font", DEFAULT_1P_FONT),
+                    max_width=nameplate_cfg.get("singleplayer_max_width", 120))
+
+            # Boss nameplate is optional, so only made when text is given
+            boss_text = nameplate_cfg.get("boss")
+            if boss_text and not os.path.isfile(
+                    f"{output_path}/nameplate_boss.png"):
+                generate_1p_name_image(
+                    boss_text, f"{output_path}/nameplate_boss.png",
+                    nameplate_cfg.get("singleplayer_font", DEFAULT_1P_FONT),
+                    max_width=nameplate_cfg.get("singleplayer_max_width", 120))
+
         # Character select name texture
         name_texture = self.name_texture_default
 
@@ -774,6 +918,11 @@ class CharacterProcessor:
         # Use alternate width for character's 1P name texture if defined
         alt_name_width = sp_config.get(
             "alt_name_width", None)
+        # Generated 1P names are padded to a multiple of 8 wide; tell the
+        # game the visible width so it lays out like a vanilla name.
+        if alt_name_width is None and generated_1p_width is not None \
+                and generated_1p_width % 8:
+            alt_name_width = generated_1p_width
         alt_name_width_team = sp_config.get(
             "alt_name_width_team", alt_name_width)
         alt_name_width_giant = sp_config.get(
@@ -1082,6 +1231,19 @@ class CharacterProcessor:
         if os.path.exists(f"{output_path}/series_logo.bin"):
             with open(f"{output_path}/series_logo.bin", 'rb') as logo_file:
                 logo = bytearray(logo_file.read())
+
+            # The logo/zoom/color offsets below are counted back from the end
+            # of the file, so a truncated or padded GEE export makes the game
+            # read the wrong data and crash on the results/data screens.
+            if logo[-0x170:-0x16C] != b"\xDF\x00\x00\x00" or \
+                    logo[-4:-2] != b"\xFF\xFF":
+                logger.warning(
+                    f"{character_folder}: series_logo.bin doesn't end like a "
+                    "GEE logo export (expected the display list end 0x170 "
+                    "bytes before the end and the last pointer in the final "
+                    "4 bytes). The 3D logo will likely crash; re-export it.")
+            else:
+                self._fix_logo_material_call(character_folder, logo)
 
             # Seems like Ness logo data always begins here once imported through GEE
             logo_offset = 0x5C58
@@ -1771,6 +1933,11 @@ class CharacterProcessor:
 
         attr_offset = int(get_attrib_offset(
             './extra_characters/'+character_folder+'/main.bin'), 16)
+
+        if hud_palette_array is not None:
+            hud_icons.patch_main(hud_palette_array[0], data,
+                                 int(config["offsets"]["main"][0], 16),
+                                 hud_palette_array[1])
 
         attr_sounds = {
             "death_fgm": 0xB4,
