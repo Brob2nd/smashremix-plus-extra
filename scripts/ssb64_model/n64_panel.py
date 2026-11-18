@@ -1362,6 +1362,15 @@ PROPS = {
     'n64ui_shadow': hex_color('n64_shadow_color', '808080', name='Shadow Color',
                               description='Color of the side facing away from the light (ambient)'),
 }
+def _lock_toggle_get(self):
+    return bool(self.get('n64_lock_unused_bones', True))
+
+
+def _lock_toggle_set(self, on):
+    self['n64_lock_unused_bones'] = bool(on)
+    _sync_bone_locks(self)
+
+
 SCENE_PROPS = {
     'n64ui_light': hex_color('n64_light_color', 'FFFFFF', name='Light Color',
                              description='The model\'s light color: the lit side of every material '
@@ -1369,6 +1378,12 @@ SCENE_PROPS = {
     'n64ui_shadow': hex_color('n64_shadow_color', '808080', name='Shadow Color',
                               description='The model\'s shadow (ambient) color: the side facing away from '
                                           'the light'),
+    'n64ui_lock_unused_bones': bpy.props.BoolProperty(
+        get=_lock_toggle_get, set=_lock_toggle_set, name='Lock Bones Not in This Animation',
+        description='Lock and hide the bones the active animation\'s file has no script for (its motion '
+                    'flags leave them out of its joint tree: TopN\'s other joints, hidden parts whose bit is '
+                    'off); Save Animation .bin would drop their animation. Also locks (still shown) the '
+                    'animation-locked bones when the flags lack 0x1: the game freezes them'),
 }
 
 
@@ -1773,11 +1788,224 @@ def _follow_action_range(scene):
                 scene.frame_current = scene.frame_start
 
 
+
+# ---- bones an animation can't move: locked and hidden -------------------------------------
+# A fighter animation file has a script per joint of the tree its motion flags build (figatree.
+# joint_order: TopN's first child, depth first; hidden parts only when their bit is on); the
+# shield actions cover XRotN's subtree with the guard flags. The other bones are left out by
+# Save Animation .bin, so they're locked (transform locks) and hidden while that action is on.
+
+_GUARD_FLAGS = 0xA0000000
+_ROOT_NAMES = {1: 'TransN', 2: 'XRotN', 3: 'YRotN'}
+_LOCK_STATE = {}            # armature name -> what its locks were last set for
+_TREE_FAILED = set()        # armatures whose joint tree couldn't be found (older .blends)
+
+
+def _joint_bone(g):
+    return _ROOT_NAMES.get(g) or f'joint_{g - 4:02d}'
+
+
+def _tree_from_data(data, flags):
+    """shieldpose.tree_from_data (a copy: the .blend's embedded panel runs without the tools)."""
+    kids = {0: []}
+    last_at = {}
+    for g, depth in data['setup']:
+        parent = 0 if depth == 0 else last_at.get(depth - 1)
+        if parent is None:
+            continue
+        kids.setdefault(parent, []).append(g)
+        kids[g] = []
+        last_at[depth] = g
+    for i, (root, parent, kind) in enumerate(data['hidden']):
+        if i >= 32 or not (flags >> (31 - i)) & 1 or parent not in kids or root in kids:
+            continue
+        ch = kids[parent]
+        if kind == 0:
+            ch.append(root)
+            kids[root] = []
+        elif kind == 1:
+            ch.insert(0, root)
+            kids[root] = []
+        elif kind == 2:
+            ch.insert(1 if ch else 0, root)
+            kids[root] = []
+        else:
+            kids[root] = list(ch)
+            kids[parent] = [root]
+    return kids
+
+
+def _walk(kids, root):
+    out, stack = [], [root]
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        stack.extend(reversed(kids.get(n, [])))
+    return out
+
+
+def _joint_tree(arm):
+    """The armature's n64_joint_tree; .blends built before it: read once from the export."""
+    import json
+    if 'n64_joint_tree' in arm.keys():
+        try:
+            return json.loads(arm['n64_joint_tree'])
+        except (TypeError, ValueError):
+            return None
+    if arm.name in _TREE_FAILED:
+        return None
+    try:
+        import sys
+        d = bpy.context.scene.get('n64_tools_dir') or os.path.dirname(os.path.abspath(__file__))
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        import anim_load
+        import shieldpose
+        data = shieldpose.tree_data(anim_load.load_fighter(anim_load.export_dir_of(bpy.context.scene)))
+        arm['n64_joint_tree'] = json.dumps(data)
+        return data
+    except Exception as e:                      # noqa: BLE001 (no export / tools: nothing locked)
+        print('N64: bone locks off, no joint tree:', e)
+        _TREE_FAILED.add(arm.name)
+        return None
+
+
+def _bone_joint(name):
+    """Bone name -> game joint id (TopN 0; None: not a joint)."""
+    if name == 'TopN':
+        return 0
+    for g, n in _ROOT_NAMES.items():
+        if n == name:
+            return g
+    m = re.match(r'joint_(\d+)$', name or '')
+    return int(m.group(1)) + 4 if m else None
+
+
+def _has_joint_attrs(arm):
+    return arm is not None and arm.type == 'ARMATURE' and 'n64_joint_attrs_orig' in arm.data.keys()
+
+
+def _hidden_live(arm):
+    """The hidden parts as the bones have them now: [(root bone, parent bone, kind, init)] by index;
+    None: the armature wasn't built with joint attributes."""
+    if not _has_joint_attrs(arm):
+        return None
+    out = sorted((int(b.get('n64_hidden_index', -1)), b.name, b.get('n64_hidden_parent', 'TopN') or 'TopN',
+                  int(b.get('n64_hidden_kind', 0)), bool(b.get('n64_hidden_init', True)))
+                 for b in arm.data.bones if int(b.get('n64_hidden_index', -1)) >= 0)
+    return [x[1:] for x in out]
+
+
+def _hidden_names(ob):
+    """(hidden part root bones, their parents) in motion-flag bit order."""
+    if ob is None:
+        return [], []
+    live = _hidden_live(ob)
+    if live is not None:
+        return [h[0] for h in live], [h[1] for h in live]
+    return list(ob.get('n64_hidden_parts') or []), list(ob.get('n64_hidden_part_parents') or [])
+
+
+def _live_tree(arm, data):
+    """The joint tree data with the bones' edited setup bits / hidden parts."""
+    live = _hidden_live(arm)
+    if live is None or not data.get('all'):
+        return data
+    bones = arm.data.bones
+    setup = [[g, d] for g, d in data['all']
+             if (b := bones.get(_joint_bone(g))) is not None and b.get('n64_setup', False)]
+    hidden = [[_bone_joint(r), _bone_joint(p), k] for r, p, k, _ in live
+              if _bone_joint(r) is not None and _bone_joint(p) is not None]
+    return dict(data, setup=setup, hidden=hidden)
+
+
+def _animated_bones(arm, act):
+    """Bone names act's file can drive; None: no limit (no action, no joint tree)."""
+    if act is None:
+        return None
+    data = _joint_tree(arm)
+    if data is None:
+        return None
+    data = _live_tree(arm, data)
+    # bones that aren't game joints (IK targets / poles, helpers the user added) are never limited
+    joints = {_joint_bone(g) for g, _ in data['setup']} | {_joint_bone(h[0]) for h in data['hidden']}
+    extra = {pb.name for pb in arm.pose.bones if pb.name not in joints}
+    if act.name in ('Shield', 'Shield Neutral'):
+        flags, root = _GUARD_FLAGS, 2
+    else:
+        flags, root = _action_flags(act), None
+    kids = _tree_from_data(data, flags)
+    if root is None:
+        top = kids.get(0) or []
+        if not top:
+            return extra
+        root = top[0]
+    elif root not in kids:
+        return extra
+    return extra | {_joint_bone(g) for g in _walk(kids, root)}
+
+
+def _set_bone_locked(pb, on, hide=None):
+    pb.lock_location = pb.lock_rotation = pb.lock_scale = (on, on, on)
+    pb.lock_rotation_w = on
+    pb.lock_rotations_4d = on
+    pb.bone.hide = on if hide is None else hide
+
+
+def _anim_locked_bones(arm, act):
+    """Bones the game freezes in act (attributes animlock, Bone > N64 Joint > Animation Lock): every
+    motion without flag 0x1 (ftMainSetStatus: ftParamSetAnimLocks; the guard animations too, so the
+    Shield actions) keeps their matrix as it was and ignores their scripts."""
+    if act is None or not _has_joint_attrs(arm):
+        return set()
+    flags = _GUARD_FLAGS if act.name in ('Shield', 'Shield Neutral') else _action_flags(act)
+    if flags & 0x1:
+        return set()
+    return {b.name for b in arm.data.bones if b.get('n64_animlock', False)}
+
+
+def _sync_bone_locks(scene):
+    on = scene.get('n64_lock_unused_bones', True)
+    for arm in scene.objects:
+        if arm.type != 'ARMATURE' or 'n64_hidden_parts' not in arm.keys() or arm.mode == 'EDIT':
+            continue
+        act = arm.animation_data.action if arm.animation_data is not None else None
+        key = (act.name if act is not None else None, _action_flags(act) if act is not None else 0, bool(on),
+               len(arm.pose.bones), str(_hidden_live(arm)),
+               tuple(b.name for b in arm.data.bones if b.get('n64_setup', False)),
+               tuple(b.name for b in arm.data.bones if b.get('n64_animlock', False)))
+        if _LOCK_STATE.get(arm.name) == key:
+            continue
+        _LOCK_STATE[arm.name] = key
+        allowed = _animated_bones(arm, act) if on else None
+        # name -> hidden too: bones the file leaves out are hidden; animation-locked ones stay visible
+        # (the game still draws them, frozen)
+        want = {} if allowed is None else {pb.name: True for pb in arm.pose.bones if pb.name not in allowed}
+        if on:
+            for name in _anim_locked_bones(arm, act):
+                want.setdefault(name, False)
+        had = set(arm.get('n64_locked_bones') or [])
+        had_hidden = set(arm.get('n64_hidden_bones') or had)        # (older files: every locked one hidden)
+        if set(want) == had and {n for n, h in want.items() if h} == had_hidden:
+            continue
+        for name in had - set(want):            # only the bones locked here (not the user's own locks)
+            pb = arm.pose.bones.get(name)
+            if pb is not None:
+                _set_bone_locked(pb, False)
+        for name, hide in want.items():
+            pb = arm.pose.bones.get(name)
+            if pb is not None:
+                _set_bone_locked(pb, True, hide)
+        arm['n64_locked_bones'] = sorted(want)
+        arm['n64_hidden_bones'] = sorted(n for n, h in want.items() if h)
+
+
 def _sync_loops_on_update(scene, depsgraph):
     _sync_vs_screen(scene)
     if depsgraph.id_type_updated('ACTION') or depsgraph.id_type_updated('OBJECT'):
         sync_loops()
         _follow_action_range(scene)
+        _sync_bone_locks(scene)
 
 
 def _last_key(fcurves):
@@ -1873,7 +2101,8 @@ MODE_FLAGS = (
     (0x04, 'No Translate Scales', 'Joint translations aren\'t scaled by the fighter\'s translate_scales '
                                   '(only matters for fighters that have them)'),
     (0x02, 'Shield Pose File', 'The animation is read from the shield-pose file (guard on / off)'),
-    (0x01, 'Animation Locks', 'The fighter\'s locked joints (attributes animlock) are animated too'),
+    (0x01, 'Animation Locks', 'The fighter\'s locked joints (attributes animlock, Bone > N64 Joint) are animated '
+                              'too; off: the game freezes them and Blender locks their bones'),
 )
 HIDDEN_DESC = {
     'TransN': 'Root motion: the game moves the fighter by its translation',
@@ -2067,6 +2296,7 @@ def draw_motion_flags(lay, context):
         lay.label(text='Pick a fighter animation in the Action Editor', icon='INFO')
         return
     lay.label(text=act.name, icon='ACTION')
+    lay.prop(context.scene, 'n64ui_lock_unused_bones')
     if act.get('n64_actions'):
         col = lay.column(align=True)
         col.label(text='Played by:')
@@ -2077,11 +2307,10 @@ def draw_motion_flags(lay, context):
     if act.get('n64_flags_guessed'):
         lay.label(text='Guessed from the file\'s joint count', icon='QUESTION')
     v = _action_flags(act)
-    parts = list(ob.get('n64_hidden_parts') or []) if ob is not None else []
+    parts, parents = _hidden_names(ob)
     box = lay.box()
     box.label(text='Joints added (hidden parts)', icon='BONE_DATA')
     col = box.column(align=True)
-    parents = list(ob.get('n64_hidden_part_parents') or []) if ob is not None else []
     for i, name in enumerate(parts[:27]):
         bit = 31 - i
         r = col.row()
@@ -3680,11 +3909,921 @@ class N64_PT_gamedata(bpy.types.Panel):
             lay.label(text=f'{ob.name}: scale / move its points (Edit Mode)', icon='SELECT_SET')
 
 
+# ---- joint attributes (jointattrs.py): Bone > N64 Joint, Armature > N64 Fighter Joints -------
+
+HIDDEN_KINDS = (('0', 'Last Child', 'Added as its parent\'s last child', 0),
+                ('1', 'First Child', 'Added as its parent\'s first child', 1),
+                ('2', 'After First Child', 'Added right after its parent\'s first child', 2),
+                ('3', 'Between Parent and Children', 'Inserted between its parent and the parent\'s children '
+                                                     '(they hang from it)', 3))
+EFFECT_SLOTS = 5
+
+
+def _joint_attr_changed(self, context):
+    _LOCK_STATE.clear()
+
+
+def _idp(kind, key, default, **kw):
+    """A bpy property kept in the ID's own custom property `key` (what build_blend.py /
+    blend_gamedata.py read and write: Blender 5 keeps bpy.props values apart from custom ones)."""
+    def get(self):
+        v = self.get(key, default)
+        if kind is bpy.props.FloatVectorProperty:
+            return tuple(float(x) for x in v)
+        if kind is bpy.props.EnumProperty:
+            return int(v)
+        if kind is bpy.props.BoolProperty:
+            return bool(v)
+        return v
+
+    def set(self, v):
+        self[key] = list(v) if kind is bpy.props.FloatVectorProperty else v
+        _LOCK_STATE.clear()
+    if kind is not bpy.props.EnumProperty:
+        kw['default'] = default
+    return kind(get=get, set=set, **kw)
+
+
+def _joint_bone_props():
+    return {
+        'n64_setup': _idp(
+            bpy.props.BoolProperty, 'n64_setup', True, name='Created With the Fighter',
+            description='setup_parts (attributes + 0x29C): the joint exists from the start. Off: withheld - it '
+                        'exists only while a hidden part adds it (its motion flag), or never'),
+        'n64_animlock': _idp(
+            bpy.props.BoolProperty, 'n64_animlock', False, name='Animation Lock',
+            description='animlock (attributes + 0x2A0): in motions without flag 0x1 (Animation Locks), the game '
+                        'freezes this joint as it was and ignores its animation; Blender locks the bone in those '
+                        'actions'),
+        'n64_translate_scale': _idp(
+            bpy.props.FloatVectorProperty, 'n64_translate_scale', (1.0, 1.0, 1.0), name='Translate Scale', size=3,
+            subtype='XYZ',
+            description='translate_scales (attributes + 0x324): the joint\'s animated translation is scaled by '
+                        'this (not with motion flag 0x4). Any value other than 1 makes the fighter use the table'),
+        'n64_hidden_index': _idp(
+            bpy.props.IntProperty, 'n64_hidden_index', -1, name='Hidden Part', min=-1, max=31,
+            description='hiddenparts (attributes + 0x2D0): motion flag bit 31 - index adds this joint'),
+        'n64_hidden_parent': _idp(
+            bpy.props.StringProperty, 'n64_hidden_parent', 'TopN', name='Parent',
+            description='The joint it is added under (TopN: the fighter\'s top joint)'),
+        'n64_hidden_kind': _idp(bpy.props.EnumProperty, 'n64_hidden_kind', 0, name='Placement', items=HIDDEN_KINDS,
+                                                  description='Where among the parent\'s children it goes'),
+        'n64_hidden_init': _idp(
+            bpy.props.BoolProperty, 'n64_hidden_init', True, name='Init Transform',
+            description='The hidden part entry\'s third word: nonzero gives the joint transform kind 0x4B '
+                        '(every vanilla part but TransN)'),
+    }
+
+
+def _bone_slot(name, desc, key):
+    return _idp(bpy.props.StringProperty, key, '', name=name, description=desc)
+
+
+def _armature_props():
+    d = {}
+    for i in range(EFFECT_SLOTS):
+        d[f'n64_effect_joint_{i}'] = _bone_slot(
+            f'Effect Joint {i + 1}', 'effect_joint_ids (attributes + 0x2A4): the game cycles through these 5 joints '
+                                     'for some effects (electric / flame hits)', f'n64_effect_joint_{i}')
+    d['n64_item_heavy'] = _bone_slot('Heavy Item', 'joint_itemheavy_id (attributes + 0x334): where crates / barrels '
+                                                   'are carried', 'n64_item_heavy')
+    d['n64_item_light'] = _bone_slot('Light Item', 'joint_itemlight_id (attributes + 0x33C): the hand that holds '
+                                                   'light items (Ray Gun, Beam Sword...)', 'n64_item_light')
+    for s, side in (('r', 'Right'), ('l', 'Left')):
+        d[f'n64_foot_{s}'] = _bone_slot(f'{side} Thigh', f'joint_{s}foot_id: the {side.lower()} leg\'s top joint '
+                                                         'for the slope foot IK (thigh -> hip -> knee -> ankle)',
+                                        f'n64_foot_{s}')
+        d[f'n64_foot_{s}_len'] = _idp(
+            bpy.props.FloatProperty, f'n64_foot_{s}_len', 0.0, name=f'{side} Shin Point', description='joint_*foot_rotate: how far down the shin the IK moves '
+                                                   '(about 0.925 of the knee -> ankle distance)')
+    for k in range(2):
+        d[f'n64_texpart_{k}_joint'] = _bone_slot(f'Alternate Texture {k + 1} Joint', 'textureparts (attributes + 0x330): '
+                                                 'the joint whose material swaps image (empty: unused)',
+                                                 f'n64_texpart_{k}_joint')
+        d[f'n64_texpart_{k}_hi'] = _idp(bpy.props.IntProperty, f'n64_texpart_{k}_hi', 0, name='Material (hi)',
+                                        min=0, max=255,
+                                                         description='Index of the swapping material on that joint')
+        d[f'n64_texpart_{k}_lo'] = _idp(bpy.props.IntProperty, f'n64_texpart_{k}_lo', 0, name='Material (lo)',
+                                        min=0, max=255,
+                                                         description='The same, low detail model')
+    d['n64_access_joint'] = _bone_slot('Accessory Joint', 'accesspart (attributes + 0x32C): the joint the '
+                                                          'accessory part is drawn on', 'n64_access_joint')
+    return d
+
+
+JOINT_BONE_PROPS = _joint_bone_props()
+ARMATURE_PROPS = _armature_props()
+
+
+def _fighter_armature(context):
+    ob = context.object
+    if ob is not None and ob.type == 'ARMATURE' and _has_joint_attrs(ob):
+        return ob
+    return next((o for o in context.scene.objects if _has_joint_attrs(o)), None)
+
+
+def joint_roles(arm, name):
+    """What the game uses the joint for: [(text, icon)]."""
+    ad = arm.data
+    g = _bone_joint(name)
+    out = []
+    if name == 'TransN':
+        out.append(('Root motion (the game moves the fighter by its translation)', 'ORIENTATION_GLOBAL'))
+    for i in range(EFFECT_SLOTS):
+        if ad.get(f'n64_effect_joint_{i}') == name:
+            out.append((f'Effect joint {i + 1}', 'SHADERFX'))
+    if ad.get('n64_item_heavy') == name:
+        out.append(('Holds heavy items', 'PACKAGE'))
+    if ad.get('n64_item_light') == name:
+        out.append(('Holds light items', 'TOOL_SETTINGS'))
+    for s, side in (('r', 'Right'), ('l', 'Left')):
+        if ad.get(f'n64_foot_{s}') == name:
+            out.append((f'{side} thigh (slope foot IK)', 'CON_KINEMATIC'))
+    for k in range(2):
+        if ad.get(f'n64_texpart_{k}_joint') == name:
+            out.append((f'Alternate texture {k + 1} (material {ad.get(f"n64_texpart_{k}_hi", 0)})', 'IMAGE_DATA'))
+    if ad.get('n64_access_joint') == name and 'n64_access_joint' in ad.keys():
+        out.append(('Accessory part', 'MOD_CLOTH'))
+    b = ad.bones.get(name)
+    if b is not None and int(b.get('n64_hidden_index', -1)) >= 0:
+        i = int(b['n64_hidden_index'])
+        out.append((f'Hidden part {i} (motion flag {1 << (31 - i):08X})', 'HIDE_OFF'))
+    elif b is not None and g is not None and g >= 4 and not b.get('n64_setup', True):
+        out.append(('Withheld: never created (not set up, no hidden part adds it)', 'ERROR'))
+    nh = len(hurtbox_objects(name))
+    if nh:
+        out.append((f'{nh} hurtbox{"es" if nh > 1 else ""}', 'MESH_CUBE'))
+    if g is not None and g >= 4:
+        j = g - 4
+        parts = sorted({m.group(1) for o in bpy.data.objects
+                        if (m := re.match(rf'part(\d+)_(?:hi|lo)_j0*{j}$', o.name))}, key=int)
+        if parts:
+            out.append((f'Model parts: variants {", ".join(parts)} (moveset model part events)', 'MESH_DATA'))
+        skel = sorted({m.group(1) for o in bpy.data.objects if (m := re.match(rf'skel(\d+)_j0*{j}$', o.name))})
+        if skel:
+            out.append((f'Electric skeleton: {", ".join(skel)}', 'OUTLINER_OB_ARMATURE'))
+    return out
+
+
+class N64_OT_hidden_part_add(bpy.types.Operator):
+    bl_idname = 'n64.hidden_part_add'
+    bl_label = 'Make Hidden Part'
+    bl_description = ('This joint becomes the fighter\'s next hidden part: a motion flag bit adds it (it\'s no '
+                      'longer created with the fighter)')
+    bl_options = {'UNDO'}
+
+    def execute(self, context):
+        arm = _fighter_armature(context)
+        b = arm.data.bones.get(_context_bone(context).name)
+        live = _hidden_live(arm)
+        if len(live) >= 27:
+            self.report({'ERROR'}, 'No motion flag bit left (27 hidden parts at most: the low 5 bits are modes)')
+            return {'CANCELLED'}
+        b['n64_hidden_index'] = len(live)
+        b['n64_hidden_parent'] = b.parent.name if b.parent is not None else 'TopN'
+        b['n64_hidden_kind'] = 0
+        b['n64_hidden_init'] = True
+        b['n64_setup'] = False
+        _LOCK_STATE.clear()
+        self.report({'INFO'}, f'{b.name}: hidden part {len(live)} (motion flag {1 << (31 - len(live)):08X})')
+        return {'FINISHED'}
+
+
+class N64_OT_hidden_part_remove(bpy.types.Operator):
+    bl_idname = 'n64.hidden_part_remove'
+    bl_label = 'Remove Hidden Part'
+    bl_description = ('This joint stops being a hidden part (only the last one: removing another would move the '
+                      'later parts to other motion flag bits)')
+    bl_options = {'UNDO'}
+
+    def execute(self, context):
+        arm = _fighter_armature(context)
+        b = arm.data.bones.get(_context_bone(context).name)
+        live = _hidden_live(arm)
+        i = int(b.get('n64_hidden_index', -1))
+        if i != len(live) - 1:
+            self.report({'ERROR'}, f'Only the last hidden part ({live[-1][0]}) can be removed: the parts after '
+                                   'this one would move to other motion flag bits')
+            return {'CANCELLED'}
+        b['n64_hidden_index'] = -1
+        b['n64_setup'] = True
+        _LOCK_STATE.clear()
+        return {'FINISHED'}
+
+
+class N64_PT_bone_joint(bpy.types.Panel):
+    bl_label = 'N64 Joint'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'bone'
+
+    @classmethod
+    def poll(cls, context):
+        bone = _context_bone(context)
+        arm = context.object
+        return bone is not None and _has_joint_attrs(arm) and _bone_joint(bone.name) is not None
+
+    def draw(self, context):
+        lay = self.layout
+        arm = context.object
+        name = _context_bone(context).name
+        b = arm.data.bones[name]
+        g = _bone_joint(name)
+        lay.label(text=f'Game joint {g}' + (f' (DObjDesc {g - 4})' if g >= 4 else ''), icon='BONE_DATA')
+        roles = joint_roles(arm, name)
+        box = lay.box()
+        if roles:
+            for text, icon in roles:
+                box.label(text=text, icon=icon)
+        else:
+            box.label(text='No attribute names this joint', icon='INFO')
+        col = lay.column()
+        col.use_property_split = True
+        if arm.mode == 'EDIT':
+            lay.label(text='Pose or Object Mode to edit these', icon='INFO')
+            col.enabled = False
+        if g >= 4:
+            col.prop(b, 'n64_setup')
+            col.prop(b, 'n64_animlock')
+        col.prop(b, 'n64_translate_scale')
+        hb = lay.box()
+        if int(b.get('n64_hidden_index', -1)) >= 0:
+            hb.label(text=f'Hidden part {b["n64_hidden_index"]}: motion flag '
+                          f'{1 << (31 - int(b["n64_hidden_index"])):08X} adds it', icon='HIDE_OFF')
+            c = hb.column()
+            c.use_property_split = True
+            c.enabled = arm.mode != 'EDIT'
+            c.prop_search(b, 'n64_hidden_parent', arm.data, 'bones')
+            if b.get('n64_hidden_parent', 'TopN') == 'TopN':
+                c.label(text='TopN: the fighter\'s top joint')
+            c.prop(b, 'n64_hidden_kind')
+            c.prop(b, 'n64_hidden_init')
+            hb.operator('n64.hidden_part_remove', icon='X')
+        elif g >= 1:
+            hb.operator('n64.hidden_part_add', icon='HIDE_OFF')
+        if g >= 4 and bpy.data.collections.get('Model parts') is not None:
+            draw_part_variants(lay, context.scene, g - 4)
+
+
+class N64_PT_fighter_joints(bpy.types.Panel):
+    bl_label = 'N64 Fighter Joints'
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'data'
+
+    @classmethod
+    def poll(cls, context):
+        return _has_joint_attrs(context.object)
+
+    def draw(self, context):
+        lay = self.layout
+        ad = context.object.data
+        col = lay.column()
+        col.use_property_split = True
+        col.label(text='Items', icon='PACKAGE')
+        col.prop_search(ad, 'n64_item_light', ad, 'bones')
+        col.prop_search(ad, 'n64_item_heavy', ad, 'bones')
+        col.separator()
+        col.label(text='Slope foot IK', icon='CON_KINEMATIC')
+        for s in ('r', 'l'):
+            col.prop_search(ad, f'n64_foot_{s}', ad, 'bones')
+            col.prop(ad, f'n64_foot_{s}_len')
+        col.separator()
+        col.label(text='Effect joints (cycled through)', icon='SHADERFX')
+        for i in range(EFFECT_SLOTS):
+            col.prop_search(ad, f'n64_effect_joint_{i}', ad, 'bones')
+        if any(f'n64_texpart_{k}_hi' in ad.keys() for k in range(2)):
+            col.separator()
+            col.label(text='Alternate textures (texture parts: expressions...)', icon='IMAGE_DATA')
+            for k in range(2):
+                col.prop_search(ad, f'n64_texpart_{k}_joint', ad, 'bones')
+                r = col.row(align=True)
+                r.prop(ad, f'n64_texpart_{k}_hi')
+                r.prop(ad, f'n64_texpart_{k}_lo')
+        if 'n64_access_joint' in ad.keys():
+            col.separator()
+            col.prop_search(ad, 'n64_access_joint', ad, 'bones')
+        live = _hidden_live(context.object) or []
+        box = lay.box()
+        box.label(text=f'Hidden parts: {len(live)} (Bone > N64 Joint)', icon='HIDE_OFF')
+        for i, (root, parent, kind, _) in enumerate(live):
+            box.label(text=f'{i}  {1 << (31 - i):08X}  {root}  under {parent}  ({HIDDEN_KINDS[kind][1].lower()})')
+        withheld = [b.name for b in ad.bones if (_bone_joint(b.name) or 0) >= 4 and not b.get('n64_setup', True)
+                    and int(b.get('n64_hidden_index', -1)) < 0]
+        if withheld:
+            lay.label(text='Never created: ' + ', '.join(withheld), icon='ERROR')
+
+
+# ---- fighter view: costume, model part variants, expressions (previews; the import resets them) ----
+
+_MAN_CACHE = {}
+
+
+def _manifest(scene=None):
+    """The export's manifest.json (cached by modification time); {} when there is none."""
+    import json
+    scene = scene or bpy.context.scene
+    d = os.path.normpath(bpy.path.abspath(scene.get('n64_export_dir', scene.get('fighter_export_dir', '//'))))
+    p = os.path.join(d, 'manifest.json')
+    try:
+        t = os.path.getmtime(p)
+    except OSError:
+        return {}
+    if _MAN_CACHE.get('path') != (p, t):
+        try:
+            _MAN_CACHE.update(path=(p, t), man=json.load(open(p)), dir=d)
+        except (OSError, ValueError):
+            return {}
+    return _MAN_CACHE['man']
+
+
+def _export_path(rel):
+    return os.path.join(_MAN_CACHE.get('dir', ''), rel) if rel else None
+
+
+def _costume_count():
+    return len([c for c in bpy.data.collections if re.match(r'Costume \d+$', c.name)])
+
+
+def _costume_shown(scene):
+    return int(scene.get('n64_costume_shown', 0))
+
+
+def _load_image(path):
+    if not path or not os.path.exists(path):
+        return None
+    want = os.path.normpath(path)
+    for img in bpy.data.images:                 # (the .blend's own copy: a relative path)
+        if img.filepath and os.path.normpath(bpy.path.abspath(img.filepath, library=img.library)) == want:
+            return img
+    return bpy.data.images.load(path, check_existing=True)
+
+
+def _costume_mat(base, k):
+    """Costume k's copy of material `base` (the body's `<base>_c<k>`, else a copy with the image's
+    `_c<k>.png` sibling: how the import reads parts' / low detail's costumes)."""
+    if k == 0:
+        return base
+    name = f'{base.name}_c{k}'
+    m = bpy.data.materials.get(name)
+    if m is not None:
+        return m
+    m = base.copy()
+    m.name = name
+    tex = _tex_node(m)
+    if tex is not None and tex.image is not None and tex.image.filepath:
+        p = bpy.path.abspath(tex.image.filepath)
+        sib = re.sub(r'_c0\.png$', f'_c{k}.png', p)
+        img = _load_image(sib) if sib != p else None
+        if img is not None:
+            tex.image = img
+    return m
+
+
+def _view_objects(coll_name):
+    c = bpy.data.collections.get(coll_name)
+    return [o for o in c.all_objects if o.type == 'MESH'] if c is not None else []
+
+
+def apply_costume(scene, k):
+    """Show costume k: its collection (the others hidden), and the parts' / low detail's
+    materials in its colors (object-linked slots; costume 0 = the meshes' own)."""
+    k = max(0, min(int(k), max(_costume_count() - 1, 0)))
+    scene['n64_costume_shown'] = k
+    vl = scene.view_layers[0] if bpy.context.view_layer is None else bpy.context.view_layer
+    for c in bpy.data.collections:
+        m = re.match(r'Costume (\d+)$', c.name)
+        if not m:
+            continue
+        lc = _find_layer_collection(vl.layer_collection, c.name)
+        if lc is not None:
+            lc.hide_viewport = int(m.group(1)) != k
+        c.hide_render = int(m.group(1)) != k
+    for ob in _view_objects('Model parts') + _view_objects('Low detail'):
+        for i, slot in enumerate(ob.material_slots):
+            base = ob.data.materials[i] if i < len(ob.data.materials) else None
+            if base is None:
+                continue
+            if k == 0:
+                slot.link = 'DATA'
+            else:
+                slot.link = 'OBJECT'
+                slot.material = _costume_mat(base, k)
+        if k == 0:
+            ob.pop('n64_costume_preview', None)
+        else:
+            ob['n64_costume_preview'] = k
+    apply_expressions(scene)
+
+
+def _find_layer_collection(lc, name):
+    if lc.collection.name == name:
+        return lc
+    for ch in lc.children:
+        r = _find_layer_collection(ch, name)
+        if r is not None:
+            return r
+    return None
+
+
+# -- expressions (texture parts): which image of the list the face materials draw
+
+def _expr_materials(man, tp):
+    """Material base names texture part tp switches: the joint's MObj at its index (hi / lo body,
+    the joint's model part variants)."""
+    out = []
+    j = tp['joint']
+    for detail, key in (('hi', 'mobj_hi'), ('lo', 'mobj_lo')):
+        idx = tp.get(key)
+        if idx is None:
+            continue
+        names = ((man.get('mobj_order') or {}).get(detail) or {}).get(str(j)) or []
+        if idx < len(names) and names[idx]:
+            out.append(names[idx])
+        for p in man.get('model_parts') or []:
+            if p['joint'] == j and p['detail'] == detail:
+                order = p.get('mobj_order') or []
+                if idx < len(order) and order[idx]:
+                    out.append(order[idx])
+    return list(dict.fromkeys(out))
+
+
+def texture_parts(scene):
+    """The texture parts as the armature has them now (Armature > N64 Fighter Joints: joint +
+    material index per detail), else the export's: [dict(index, joint (DObjDesc), mobj_hi, mobj_lo)]."""
+    arm = next((o for o in scene.objects if _has_joint_attrs(o)), None)
+    if arm is None:
+        return list(_manifest(scene).get('expressions') or [])
+    ad, out = arm.data, []
+    for k in range(2):
+        g = _bone_joint(ad.get(f'n64_texpart_{k}_joint', '') or '')
+        if g is None or g < 4:
+            continue
+        out.append(dict(index=k, joint=g - 4, mobj_hi=int(ad.get(f'n64_texpart_{k}_hi', 0)),
+                        mobj_lo=int(ad.get(f'n64_texpart_{k}_lo', 0))))
+    return out
+
+
+def joint_image_lists(man, j):
+    """The joint's hi MObjs with an image list: [(MObj index, material, images)]."""
+    names = ((man.get('mobj_order') or {}).get('hi') or {}).get(str(j)) or []
+    return [(i, n, len((man['materials'].get(n) or {}).get('images') or [])) for i, n in enumerate(names)
+            if n and len((man['materials'].get(n) or {}).get('images') or []) > 1]
+
+
+def list_images(man, base):
+    """Material `base`'s image list: the export's entries (paths), then the ones added in Blender
+    (its 'N64 Frame <i>' nodes past them: the import appends them to the list)."""
+    out = [_export_path(r) for r in (man['materials'].get(base) or {}).get('images') or []]
+    m = bpy.data.materials.get(base)
+    if m is not None:
+        for i, n in enumerate(frame_nodes(m)):
+            if i >= len(out) and n.image is not None:
+                out.append(os.path.normpath(bpy.path.abspath(n.image.filepath, library=n.image.library)))
+    return out
+
+
+def expression_images(man, tp):
+    """How many images the texture part can pick (its materials' image list)."""
+    return max([len(list_images(man, n)) for n in _expr_materials(man, tp)] or [0])
+
+
+def _set_tex_image(m, img):
+    tex = _tex_node(m)
+    if tex is None:
+        return
+    if img is None:
+        if 'n64_expr_orig' in m.keys():
+            orig = bpy.data.images.get(m['n64_expr_orig'])
+            if orig is None or not orig.filepath:
+                orig = _load_image(bpy.path.abspath(m.get('n64_expr_orig_path', '')))
+            if orig is not None:
+                tex.image = orig
+            for k in ('n64_expr_orig', 'n64_expr_orig_path'):
+                m.pop(k, None)
+        return
+    if 'n64_expr_orig' not in m.keys() and tex.image is not None:
+        m['n64_expr_orig'] = tex.image.name
+        m['n64_expr_orig_path'] = tex.image.filepath
+        tex.image.use_fake_user = True          # (kept in the file while the preview is shown)
+    tex.image = img
+
+
+def apply_expressions(scene):
+    """Each texture part's picked image (scene n64_expr_shown: {part index: image index}; none =
+    the costume's own) on its materials, in the shown costume's palette."""
+    man = _manifest(scene)
+    shown = dict(scene.get('n64_expr_shown') or {})
+    c = _costume_shown(scene)
+    for m in bpy.data.materials:            # (a part that changed material leaves no preview behind)
+        if 'n64_expr_orig' in m.keys():
+            _set_tex_image(m, None)
+    for tp in texture_parts(scene):
+        i = shown.get(str(tp['index']))
+        for base in _expr_materials(man, tp):
+            entry = man['materials'].get(base) or {}
+            mats = [bpy.data.materials.get(base if c == 0 else f'{base}_c{c}')]
+            for m in [m for m in mats if m is not None]:
+                imgs = list_images(man, base)
+                if i is None or i >= len(imgs):
+                    _set_tex_image(m, None)
+                    continue
+                img = _load_image(imgs[i])
+                cmap = entry.get('costume_map') or []
+                pals = entry.get('palettes') or []
+                if img is not None and pals and len(cmap) > c and cmap[c][1] != cmap[0][1] \
+                        and max(cmap[c][1], cmap[0][1]) < len(pals):
+                    p0, pc = _load_image(_export_path(pals[cmap[0][1]])), _load_image(_export_path(pals[cmap[c][1]]))
+                    if p0 is not None and pc is not None:
+                        img = _recolored(img, p0, pc, f'{base} N64 expression{i} costume{c}')
+                _set_tex_image(m, img)
+
+
+def reset_previews():
+    """Back to what the import reads: costume 0's materials on parts / low detail, every
+    material's own image (blend_to_gltf.py calls this first)."""
+    for ob in bpy.data.objects:
+        if 'n64_costume_preview' in ob.keys() and ob.type == 'MESH':
+            for slot in ob.material_slots:
+                slot.link = 'DATA'
+            del ob['n64_costume_preview']
+    for m in bpy.data.materials:
+        if 'n64_expr_orig' in m.keys():
+            _set_tex_image(m, None)
+    for name in ('Costume 0', 'Model parts', 'Low detail'):
+        for o in _view_objects(name):
+            try:
+                o.hide_set(False)
+            except RuntimeError:            # (not in the view layer)
+                pass
+
+
+# -- model parts: variants per joint ('part<v>_<hi|lo>_j<NN>' in Model parts)
+
+def part_objects(j, v=None, detail=None):
+    out = {}
+    for o in _view_objects('Model parts'):
+        m = re.match(r'part(\d+)_(hi|lo)_j(\d+)$', o.name)
+        if m and int(m.group(3)) == j and (v is None or int(m.group(1)) == v) and \
+                (detail is None or m.group(2) == detail):
+            out.setdefault(int(m.group(1)), []).append(o)
+    return out
+
+
+def body_objects(j, detail='hi'):
+    pat = re.compile(rf'{detail}_j{j:02d}(_c\d+)?$')
+    return [o for o in bpy.data.objects if o.type == 'MESH' and pat.match(o.name)]
+
+
+def apply_parts(scene):
+    """Each joint's shown piece (scene n64_parts_shown {joint: -2 body, -1 nothing, v variant}):
+    the body's piece, or the variant's objects in its place (like the game's model part events)."""
+    shown = {int(k): int(v) for k, v in dict(scene.get('n64_parts_shown') or {}).items()}
+    vl = bpy.context.view_layer
+    lc = _find_layer_collection(vl.layer_collection, 'Model parts')
+    if lc is None:
+        return
+    any_part = any(v >= 0 for v in shown.values())
+    if any_part:
+        if lc.hide_viewport:
+            scene['n64_parts_auto'] = True
+        lc.hide_viewport = False
+        for o in _view_objects('Model parts'):
+            m = re.match(r'part(\d+)_hi_j(\d+)$', o.name)
+            o.hide_set(not (m and shown.get(int(m.group(2)), -2) == int(m.group(1))))
+    elif scene.get('n64_parts_auto'):
+        lc.hide_viewport = True
+        for o in _view_objects('Model parts'):
+            o.hide_set(False)
+        del scene['n64_parts_auto']
+    for j in set(shown) | set(int(k) for k in dict(scene.get('n64_parts_seen') or {})):
+        for o in body_objects(j):
+            o.hide_set(shown.get(j, -2) != -2)
+    scene['n64_parts_seen'] = {str(j): 1 for j in shown}
+
+
+class N64_OT_part_show(bpy.types.Operator):
+    bl_idname = 'n64.part_show'
+    bl_label = 'Show Model Part'
+    bl_description = 'Show this piece on the joint (the body\'s, a model part variant, or nothing), like the game\'s model part event'
+    bl_options = {'UNDO'}
+    joint: bpy.props.IntProperty()
+    variant: bpy.props.IntProperty(default=-2)
+
+    def execute(self, context):
+        shown = dict(context.scene.get('n64_parts_shown') or {})
+        if self.variant == -2:
+            shown.pop(str(self.joint), None)
+        else:
+            shown[str(self.joint)] = self.variant
+        context.scene['n64_parts_shown'] = shown
+        apply_parts(context.scene)
+        return {'FINISHED'}
+
+
+class N64_OT_part_select(bpy.types.Operator):
+    bl_idname = 'n64.part_select'
+    bl_label = 'Select Model Part'
+    bl_description = 'Show this variant and select its objects (high detail active) to edit'
+    bl_options = {'UNDO'}
+    joint: bpy.props.IntProperty()
+    variant: bpy.props.IntProperty()
+
+    def execute(self, context):
+        bpy.ops.n64.part_show(joint=self.joint, variant=self.variant)
+        objs = part_objects(self.joint, self.variant).get(self.variant, [])
+        if not objs:
+            return {'CANCELLED'}
+        if context.object is not None and context.object.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for o in context.view_layer.objects:
+            o.select_set(False)
+        hi = next((o for o in objs if '_hi_' in o.name), objs[0])
+        hi.hide_set(False)
+        hi.select_set(True)
+        context.view_layer.objects.active = hi
+        return {'FINISHED'}
+
+
+class N64_OT_part_add(bpy.types.Operator):
+    bl_idname = 'n64.part_add'
+    bl_label = 'Add Model Part Variant'
+    bl_description = ('A new variant for this joint (the next id: moveset model part events / code pick it), '
+                      'starting as a copy of the body\'s piece or of another variant (high and low detail)')
+    bl_options = {'UNDO'}
+    joint: bpy.props.IntProperty()
+    source: bpy.props.IntProperty(default=-2, description='-2: the body\'s piece; else the variant to copy')
+
+    def execute(self, context):
+        j = self.joint
+        have = part_objects(j)
+        v = max(have) + 1 if have else 0
+        coll = bpy.data.collections.get('Model parts')
+        if coll is None:
+            self.report({'ERROR'}, 'No Model parts collection')
+            return {'CANCELLED'}
+        made = []
+        for detail in ('hi', 'lo'):
+            if self.source == -2:
+                src = next((o for o in body_objects(j, detail) if not re.search(r'_c\d+$', o.name)), None)
+            else:
+                src = next(iter(part_objects(j, self.source, detail).get(self.source, [])), None)
+            if src is None and detail == 'lo' and made:
+                src = made[0]                    # no low detail piece: the high one, edit it down
+            if src is None:
+                continue
+            o = src.copy()
+            o.data = src.data.copy()
+            o.name = f'part{v}_{detail}_j{j:02d}'
+            o.pop('n64_costume_preview', None)
+            for slot in o.material_slots:
+                slot.link = 'DATA'
+            coll.objects.link(o)
+            made.append(o)
+        if not made:
+            self.report({'ERROR'}, f'joint_{j:02d} has no piece to copy: model one as an object named '
+                                   f'part{v}_hi_j{j:02d} in Model parts (vertex group joint_{j:02d}, Armature modifier)')
+            return {'CANCELLED'}
+        if _costume_shown(context.scene):
+            apply_costume(context.scene, _costume_shown(context.scene))
+        bpy.ops.n64.part_select(joint=j, variant=v)
+        self.report({'INFO'}, f'joint_{j:02d}: variant {v} added ({", ".join(o.name for o in made)})')
+        return {'FINISHED'}
+
+
+class N64_OT_part_remove(bpy.types.Operator):
+    bl_idname = 'n64.part_remove'
+    bl_label = 'Remove Model Part Variant'
+    bl_description = ('Delete the joint\'s last variant (only the last: the others keep their ids, which '
+                      'moveset events and code use)')
+    bl_options = {'UNDO'}
+    joint: bpy.props.IntProperty()
+
+    def execute(self, context):
+        have = part_objects(self.joint)
+        if not have:
+            return {'CANCELLED'}
+        v = max(have)
+        for o in have[v]:
+            bpy.data.objects.remove(o)
+        shown = dict(context.scene.get('n64_parts_shown') or {})
+        if shown.get(str(self.joint)) == v:
+            shown.pop(str(self.joint))
+            context.scene['n64_parts_shown'] = shown
+        apply_parts(context.scene)
+        self.report({'INFO'}, f'joint_{self.joint:02d}: variant {v} removed (moveset events using it: change them)')
+        return {'FINISHED'}
+
+
+class N64_OT_costume_show(bpy.types.Operator):
+    bl_idname = 'n64.costume_show'
+    bl_label = 'Show Costume'
+    bl_description = 'Show this costume (its collection; parts and low detail in its colors)'
+    bl_options = {'UNDO'}
+    costume: bpy.props.IntProperty()
+
+    def execute(self, context):
+        apply_costume(context.scene, self.costume)
+        return {'FINISHED'}
+
+
+class N64_OT_expression_show(bpy.types.Operator):
+    bl_idname = 'n64.expression_show'
+    bl_label = 'Show Alternate Texture'
+    bl_description = ('Show this image of the texture part\'s list (costume 0: the list image itself, '
+                      'paint it in the Image Editor; other costumes: recolored preview)')
+    bl_options = {'UNDO'}
+    part: bpy.props.IntProperty()
+    image: bpy.props.IntProperty(default=-1, description='-1: the costume\'s own image')
+
+    def execute(self, context):
+        shown = dict(context.scene.get('n64_expr_shown') or {})
+        if self.image < 0:
+            shown.pop(str(self.part), None)
+        else:
+            shown[str(self.part)] = self.image
+        context.scene['n64_expr_shown'] = shown
+        apply_expressions(context.scene)
+        return {'FINISHED'}
+
+
+class N64_OT_alt_texture_add(bpy.types.Operator):
+    bl_idname = 'n64.alt_texture_add'
+    bl_label = 'Add Alternate Texture'
+    bl_description = ('A new image at the end of the list this texture part switches (every material it switches: '
+                      'high / low detail, model part variants), a copy of the shown one (else image 0) saved as '
+                      'textures/<material>_img<n>.png to paint; moveset events pick it by its number')
+    bl_options = {'UNDO'}
+    part: bpy.props.IntProperty()
+
+    def execute(self, context):
+        import shutil
+        sc = context.scene
+        man = _manifest(sc)
+        tp = next((t for t in texture_parts(sc) if t['index'] == self.part), None)
+        if tp is None:
+            return {'CANCELLED'}
+        src_i = int(dict(sc.get('n64_expr_shown') or {}).get(str(self.part), 0))
+        made, new_i = [], None
+        for base in _expr_materials(man, tp):
+            m = bpy.data.materials.get(base)
+            imgs = list_images(man, base)
+            if m is None or len(imgs) < 1:
+                continue
+            for i, path in enumerate(imgs):            # the list as Frame nodes (the import reads them)
+                n = frame_node(m, 'Frame', i)
+                if n.image is None:
+                    n.image = _load_image(path)
+            i = len(imgs)
+            src = imgs[min(src_i, len(imgs) - 1)]
+            dst = os.path.join(os.path.dirname(src), f'{base}_img{i}.png')
+            k = 1
+            while os.path.exists(dst):                 # (an earlier add's file)
+                dst = os.path.join(os.path.dirname(src), f'{base}_img{i}_{k}.png')
+                k += 1
+            shutil.copyfile(src, dst)
+            img = _load_image(dst)
+            frame_node(m, 'Frame', i).image = img
+            made.append(f'{base} image {i}')
+            new_i = i if new_i is None else min(new_i, i)
+        if not made:
+            self.report({'ERROR'}, 'The texture part\'s materials have no image list to add to')
+            return {'CANCELLED'}
+        bpy.ops.n64.expression_show(part=self.part, image=new_i)
+        self.report({'INFO'}, 'Added: ' + ', '.join(made) + ' (costume 0 shows it: paint it in the Image Editor)')
+        return {'FINISHED'}
+
+
+class N64_OT_alt_texture_remove(bpy.types.Operator):
+    bl_idname = 'n64.alt_texture_remove'
+    bl_label = 'Remove Alternate Texture'
+    bl_description = 'Remove the last image added in Blender (the list\'s exported images stay: moveset events use their numbers)'
+    bl_options = {'UNDO'}
+    part: bpy.props.IntProperty()
+
+    def execute(self, context):
+        sc = context.scene
+        man = _manifest(sc)
+        tp = next((t for t in texture_parts(sc) if t['index'] == self.part), None)
+        done = []
+        for base in _expr_materials(man, tp) if tp else []:
+            m = bpy.data.materials.get(base)
+            n_exp = len((man['materials'].get(base) or {}).get('images') or [])
+            nodes = frame_nodes(m) if m is not None else []
+            if len(nodes) > n_exp:
+                m.node_tree.nodes.remove(nodes[-1])
+                done.append(base)
+                if len(frame_nodes(m)) <= n_exp:        # back to the export's list: no Frame nodes needed
+                    for n in frame_nodes(m):
+                        m.node_tree.nodes.remove(n)
+        if not done:
+            self.report({'ERROR'}, 'Only images added in Blender can be removed')
+            return {'CANCELLED'}
+        shown = dict(sc.get('n64_expr_shown') or {})
+        shown.pop(str(self.part), None)
+        sc['n64_expr_shown'] = shown
+        apply_expressions(sc)
+        return {'FINISHED'}
+
+
+def draw_part_variants(lay, scene, j):
+    """The joint's model part variants: show (body / nothing / each), select, add, remove."""
+    have = part_objects(j)
+    cur = int(dict(scene.get('n64_parts_shown') or {}).get(str(j), -2))
+    box = lay.box()
+    box.label(text=f'Model parts: {len(have)} variant{"s" if len(have) != 1 else ""}', icon='MESH_DATA')
+    row = box.row(align=True)
+    for v, text in [(-2, 'Body'), (-1, 'None')] + [(v, str(v)) for v in sorted(have)]:
+        op = row.operator('n64.part_show', text=text, depress=cur == v)
+        op.joint, op.variant = j, v
+    for v in sorted(have):
+        r = box.row(align=True)
+        r.label(text=f'Variant {v}: ' + ', '.join(o.name for o in have[v]))
+        op = r.operator('n64.part_select', text='', icon='RESTRICT_SELECT_OFF')
+        op.joint, op.variant = j, v
+        if v == max(have):
+            r.operator('n64.part_remove', text='', icon='X').joint = j
+    r = box.row(align=True)
+    op = r.operator('n64.part_add', text='Add (copy body)', icon='ADD')
+    op.joint, op.source = j, -2
+    if have:
+        op = r.operator('n64.part_add', text=f'Add (copy {max(have)})', icon='DUPLICATE')
+        op.joint, op.source = j, max(have)
+
+
+class N64_PT_fighter_view(bpy.types.Panel):
+    bl_label = 'N64 Fighter'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'N64'
+
+    @classmethod
+    def poll(cls, context):
+        return bpy.data.collections.get('Costume 0') is not None
+
+    def draw(self, context):
+        lay = self.layout
+        sc = context.scene
+        n = _costume_count()
+        cur = _costume_shown(sc)
+        lay.label(text=f'Costume ({n})', icon='MATERIAL')
+        grid = lay.grid_flow(row_major=True, columns=8, align=True)
+        for k in range(n):
+            grid.operator('n64.costume_show', text=str(k), depress=k == cur).costume = k
+        man = _manifest(sc)
+        tps = texture_parts(sc) if man else []
+        if tps:
+            lay.label(text='Alternate textures (texture parts)', icon='IMAGE_DATA')
+            shown = dict(sc.get('n64_expr_shown') or {})
+            for tp in tps:
+                n_img = expression_images(man, tp)
+                mats = _expr_materials(man, tp)
+                row = lay.row(align=True)
+                row.label(text=f'{tp["index"] + 1}: joint_{tp["joint"]:02d} material {tp["mobj_hi"]}'
+                               + (f' ({mats[0]})' if mats else ''))
+                cur_i = int(shown.get(str(tp['index']), -1))
+                op = row.operator('n64.expression_show', text='Own', depress=cur_i < 0)
+                op.part, op.image = tp['index'], -1
+                for i in range(n_img if n_img > 1 else 0):
+                    op = row.operator('n64.expression_show', text=str(i), depress=cur_i == i)
+                    op.part, op.image = tp['index'], i
+                r = lay.row(align=True)
+                r.operator('n64.alt_texture_add', text='Add', icon='ADD').part = tp['index']
+                if any(len(frame_nodes(bpy.data.materials[b])) > len((man['materials'].get(b) or {}).get('images') or [])
+                       for b in mats if b in bpy.data.materials):
+                    r.operator('n64.alt_texture_remove', text='Remove Last Added', icon='X').part = tp['index']
+                if n_img <= 1:
+                    # the part points at a material without an image list: nothing to switch (in the
+                    # game either); point out the joint's materials that have one
+                    others = [x for x in joint_image_lists(man, tp['joint'])
+                              if x[0] not in {t['mobj_hi'] for t in tps if t['joint'] == tp['joint']}]
+                    box = lay.box()
+                    box.label(text='This material has no image list: nothing to switch, in game too', icon='ERROR')
+                    for i, n, cnt in others:
+                        box.label(text=f'Material {i} ({n}) has {cnt} images: set Alternate Texture '
+                                       f'{tp["index"] + 1} to it in Armature > N64 Fighter Joints')
+        joints = sorted({int(m.group(1)) for o in _view_objects('Model parts')
+                         if (m := re.match(r'part\d+_hi_j(\d+)$', o.name))})
+        if joints:
+            lay.label(text='Model parts (select a bone to add / edit)', icon='MESH_DATA')
+            shown = dict(sc.get('n64_parts_shown') or {})
+            for j in joints:
+                row = lay.row(align=True)
+                row.label(text=f'joint_{j:02d}')
+                cur_v = int(shown.get(str(j), -2))
+                for v, text in [(-2, 'Body'), (-1, 'None')] + [(v, str(v)) for v in sorted(part_objects(j))]:
+                    op = row.operator('n64.part_show', text=text, depress=cur_v == v)
+                    op.joint, op.variant = j, v
+
+
 CLASSES = (N64_OT_vs_view, N64_OT_joint_anim_set, N64_OT_joint_anim_remove, N64_PT_joint, N64_OT_anim_add, N64_OT_anim_remove, N64_OT_anim_settings, N64_OT_frame_add, N64_OT_frame_remove,
            N64_OT_texture_add, N64_OT_texture_remove, N64_OT_state_add, N64_OT_state_edit, N64_OT_state_remove, N64_PT_material, N64_PT_scene, N64_PT_gamedata,
            N64_OT_hurtbox_add, N64_OT_hurtbox_remove, N64_OT_hurtbox_select, N64_PT_bone_hurtboxes,
            N64_OT_coll_apply, N64_OT_coll_group, N64_OT_coll_add, N64_PT_collision_tools,
-           N64_PT_motion_flags, N64_OT_anim_load_bin, N64_OT_anim_save_bin)
+           N64_PT_motion_flags, N64_OT_anim_load_bin, N64_OT_anim_save_bin,
+           N64_OT_hidden_part_add, N64_OT_hidden_part_remove, N64_PT_bone_joint, N64_PT_fighter_joints,
+           N64_OT_part_show, N64_OT_part_select, N64_OT_part_add, N64_OT_part_remove, N64_OT_costume_show,
+           N64_OT_expression_show, N64_OT_alt_texture_add, N64_OT_alt_texture_remove, N64_PT_fighter_view)
 
 
 def _collapse_visible_outliners():
@@ -3788,6 +4927,10 @@ def register():
     handlers.append(_sync_loops_on_update)
     for name, prop in SCENE_PROPS.items():
         setattr(bpy.types.Scene, name, prop)
+    for name, prop in JOINT_BONE_PROPS.items():
+        setattr(bpy.types.Bone, name, prop)
+    for name, prop in ARMATURE_PROPS.items():
+        setattr(bpy.types.Armature, name, prop)
     bpy.types.Scene.n64ui_vs_stage = bpy.props.EnumProperty(
         items=_vs_stage_items, get=_vs_stage_get, set=_vs_stage_set, name='CPU Stage',
         description='The 1P stage the CPU is met in: its VS screen camera')
@@ -3826,6 +4969,10 @@ def unregister():
     for name in SCENE_PROPS:
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)
+    for t, props in ((bpy.types.Bone, JOINT_BONE_PROPS), (bpy.types.Armature, ARMATURE_PROPS)):
+        for name in props:
+            if hasattr(t, name):
+                delattr(t, name)
     for name in COLLISION_SCENE_PROPS:
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)

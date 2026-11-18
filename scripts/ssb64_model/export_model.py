@@ -835,11 +835,11 @@ class Exporter:
         for joint, variants in f.modelparts.items():
             for pair in variants:
                 for part in pair:
-                    an = f.ptr_main(part['field'] + 8)
+                    an = part.get('scripts')
                     ms_list = MF.pointer_run(f.char_int, part['mobjsubs']) if part['mobjsubs'] is not None else []
-                    if an and an[0] == 'char':
+                    if an is not None:
                         for i, ms in enumerate(ms_list):
-                            sc = f.char_int.get(an[1] + 4 * i)
+                            sc = f.char_int.get(an + 4 * i)
                             if sc is not None:
                                 self.script_of.setdefault(ms, sc)
         self.skeleton(hi['joints'])
@@ -852,6 +852,11 @@ class Exporter:
             # checkboxes)
             self.manifest['hidden_parts'] = [SP.joint_name(h[0]) for h in SP.hidden_parts(f)]
             self.manifest['hidden_part_parents'] = [SP.joint_name(h[1]) if h[1] else 'TopN' for h in SP.hidden_parts(f)]
+            # the joint tree per motion flags (Blender locks / hides the bones an animation leaves out)
+            self.manifest['joint_tree'] = SP.tree_data(f)
+            # the attributes that name joints (Blender: Bone > N64 Joint, Armature > N64 Fighter Joints)
+            import jointattrs as JAT
+            self.manifest['joint_attrs'] = JAT.joint_attrs(f)
         self.manifest['lights'] = MF.model_lights(f)       # light / shadow (ambient) colors
         self.manifest['expressions'] = f.textureparts      # (texture-index switches: joint + material index)
         self.expr_mobjs = self.expression_mobjs()
