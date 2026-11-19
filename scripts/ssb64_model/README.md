@@ -148,6 +148,45 @@ are optional;
 `export_model.py --help` lists them all), or the stage header file's hexadecimal ID (the decomp calls
 it the Map file). The ROM supplies the stage header and its referenced geometry files.
 
+#### Editing joints and layers: the N64 Stage panel
+
+3D View sidebar > **N64** > **N64 Stage** (stage .blend files) shows each layer as a tree, in draw order
+(top to bottom), each joint indented under its parent. Each row: a mesh icon (selects the joint's meshes;
+a dot: it has none), a bone icon (selects its bone, in Pose Mode: to animate it), its name (**Selected
+Joint > pencil** names it; else its meshes: faces and material) and small icons: animated, new, collision
+group, locked. Layers fold. Click the name: **Selected Joint** below shows its parent, children, what it's
+painted after / before, its meshes (**Put Selected Meshes Here**), animation, collision group, and actions.
+
+- **+** on a layer: **Add Joint** under any parent (no rest transform: it's placed by its animation).
+- Selected Joint: **Up / Down** move it (with its children) before / after its sibling, **Parent** hangs
+  it from another joint (it keeps its place in the world), **Remove** (its children move up; its meshes
+  must go first). Animations read from the game stay as the game's scripts while unchanged; edited, linear
+  keys store as two per segment (**Make Linear**).
+- **Remove Layer** (layers 2 and 3): the whole layer goes; the game then skips it.
+- **Put On Joint**: the selected meshes go on a joint (its layer collection, the joint's vertex group,
+  the armature). Model them around the joint's origin.
+- Animate a joint in Pose Mode like the others (Bone > N64 Joint Animation): location / rotation are
+  relative to its parent joint, in game space.
+
+The game stores a layer's joints depth first and draws them in that order (later = over earlier on the
+painted layers 0, 2 and 3), so after every edit the panel renumbers the layer depth first: bones,
+their vertex groups, animations and the meshes' joint follow. Each bone remembers which original joint
+it is (`n64_joint_orig`); the import (`import_stage.apply_joint_map`, from blend_to_gltf's `joint_map`)
+rebuilds the layers from that: a joint keeps its original's transform, DObjDesc flags, animation script
+and MObj order; new ones have no transform. An unedited layer stays byte-identical. A removed layer's
+header fields are emptied (their external pointers and `header_reqlist.txt` lines go).
+
+Collision groups and joints: collision group N moves / hides with layer 1's joint N (a hazard moves a
+platform's collision by animating that joint, and toggles a group by its number). The panel shows each
+layer 1 joint's group (and its edge count, or "empty": a group the stage's count reserves without lines);
+selecting a collision group mesh shows its joint (N64 Collision panel), with a button to select it. The
+count is the stage's own (scene `n64_collision_groups`, from the export), the same the import checks.
+
+Locked: joint 0 (the layer's root), layer 1's joints 0..N (they carry the collision groups, by index),
+layers 0 and 1 themselves. Hazard code may also address joints by index: check it after renumbering.
+On a layer drawn the "secondary" way (MPGroundData `layer_mask` bit set) every joint's display list is
+written as a DObjDLLink list, as the game reads them there.
+
 ### Hurtboxes (fighters)
 
 The `Hurtboxes` collection (hidden at first: its eye in the outliner, or **Show Hurtboxes** in the
@@ -253,7 +292,16 @@ rest): the Animation workspace opens with its Dope Sheet in **Action Editor**, p
 
 The `Shield` collection (hidden at first) has **Shield Bubble**, a sphere on `YRotN` with the
 fighter's `shield_size` (attributes + 0x74) as its radius: the shield at full health (the game's
-30-unit sphere on YRotN, scaled `shield_size / 30`).
+30-unit sphere on YRotN, scaled `shield_size / 30`). config.yaml `attributes.shield_size`, when
+there, is the size (the build writes it over main.bin's).
+
+With the ROM, **Shield Graphic** next to it is the shield as the game draws it (file 163, from
+`reference.py` -> `reference/shield.png`): a quad of `+-30` units with the bubble texture, on
+YRotN's position, always facing the camera (the game billboards it: in Blender it faces the
+front view). Its half width follows the bubble: size x `(0.65 x health / 55 + 0.35)`. Shield Bubble
+custom properties (preview only, not imported): `n64_shield_health` (0..55) and `n64_shield_port`
+(0 P1 red, 1 P2 green, 2 P3 blue, 3 P4 / CPU black, 4 the frame it's hit). Color = lerp(port color,
+white, texel), alpha = texel alpha x 0xC0, as `efManagerShieldProcDisplay` sets it.
 
 Which joints the file covers, in its order: the tree `lbCommonAddDObjAnimJointAll` walks from
 XRotN while guarding. That's the body joints `setup_parts` (attributes + 0x29C) creates, plus the
@@ -529,6 +577,24 @@ Blender reads `OUT_DIR/model.blend` into `OUT_DIR/import_work/` (`blend_to_gltf.
 files. TARGET defaults to the folder the export came from; `--out` writes the files to BUILD_DIR
 instead.
 
+### From Blender: Write Game Files
+
+**3D View > N64 > N64 Game Files** > **Write Game Files** saves the .blend (and painted images),
+then runs this import with `--out` into **Folder** (default `//to_project`, next to the .blend),
+in the background: when it's done the panel lists the files to copy into the character / stage
+folder (main.bin, character.bin, main_reqlist.txt, config.yaml when something in it changed,
+animations, shield_pose.bin, kirby_hat/...), with **Open Folder** and the **Log**
+(`import_log.txt`). The folder is emptied on each run (only one this button made).
+**Write All (Every Animation)** is the same with `import --all`: also every animation with its own
+file (`animations/*.bin`, re-encoded from Blender, edited or not; the base character's borrowed
+ones only when edited, as each would become a new file and main.asm lines), the character's own
+shield_pose.bin and config.yaml even when unchanged: a full set (Mega Man: 67 animations, ~30 s).
+
+It runs with Blender's own Python (a sandboxed Blender, like the Flatpak, can't start the system's),
+which needs Pillow and PyYAML: **Install Tools** (shown while they're missing) installs them with pip
+into Blender's user scripts folder (`ssb64_model_libs`), once. With `--out`, config.yaml edits go to
+a copy in the folder (kept only when it changed); without it, into the character's own.
+
 ### Fighters
 
 - The base `main.bin` / `character.bin` (`--main`/`--char`, default the character
@@ -558,7 +624,7 @@ models were duplicate data), Mega Man 107,632 -> 115,360, Snake 180,748 -> 107,8
 #### Fighter animations
 
 Only the animations edited since the export are written (blend_to_gltf.py compares each
-action's keys, flags and Loop with what the export made). For each, every joint is sampled per
+action's keys, flags and Loop with what the export made). `import --all` writes every one that has its own file too. For each, every joint is sampled per
 frame in the game's space and written in the 16-bit format (`figatree.py`): as few keys as play
 it within ~0.23 degrees / 0.5 units, preferring the frames of the Blender keys, each segment
 linear or cubic (whichever is smaller per joint), looping when Loop is on. Then:
@@ -604,6 +670,14 @@ to `shield_size` (attributes + 0x74) when it changed.
   `textures/<mat>_img<n>.png`, as an `N64 Frame <n>` node: the import appends it; moveset event
   0x2B picks it by number); **Remove Last Added**: only images added in Blender. A part that
   points at a material without an image list is flagged, with the joint's materials that have one.
+  **Bone > N64 Joint > Materials** lists the joint's materials in their MObj order (what a texture
+  part's index counts) and which are alternate textures; **Make Alternate Texture** gives one a free
+  slot (the game has 2; a fighter without the table gets one). A one-image material works: the
+  first **Add** gives it a second image, and the import gives the material an image list.
+  When config.yaml has `attributes: texture_forms` (the build writes them over main.bin's), those
+  are the parts; the import writes edits back there when it can say them (a joint's n-th entry
+  switches its material n), else removes the key and writes the files' container (a new 2-entry one
+  in character.bin when main.bin's holds fewer entries: vanilla containers often hold one).
   Costumes should change palettes only (Mega Man): a costume script that picks the image too
   (Cloud's did) fights the alternate textures.
 - **Model parts**: per joint, what it shows: **Body** (the body's piece), **None**, or a variant
@@ -768,6 +842,13 @@ model.blend gets a hidden **Reference** collection, never imported back:
   at his own size relative to the thrower's (Mario's `attr->size` / the fighter's).
   Which thrown animation a throw plays comes from the thrower's `attr->thrown_status`.
 Scripts that look for the fighter's armature skip ones flagged `n64_reference`.
+
+**3D View > N64 > N64 Fighter > Reference**: one button per item (shows it in the hand, again
+hides it; one at a time) with its hold joint (button: selects that bone in Pose Mode),
+**Grabbed Opponent** (show / hide) with his animation (the `Opponent: ...` actions). When
+Armature > N64 Fighter Joints names another light / heavy item joint, **Move to <bone>** puts the
+reference there (the joint's rest frame without scale, from the export's model.gltf axes; the
+opponent follows the heavy one).
 Mario is minimal: high-detail model, flat colors (each texture's average), the thrown animations.
 
 ## Loading animation files in Blender

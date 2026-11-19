@@ -2150,7 +2150,7 @@ def _flags_owner(context):
     """The armature and its action with motion flags (the active object, or the scene's fighter)."""
     ob = context.active_object
     if ob is None or ob.type != 'ARMATURE':
-        ob = next((o for o in context.scene.objects if o.type == 'ARMATURE' and 'n64_hidden_parts' in o.keys()), None)
+        ob = _scene_fighter(context)
     if ob is None or ob.animation_data is None or ob.animation_data.action is None:
         return ob, None
     act = ob.animation_data.action
@@ -2193,7 +2193,7 @@ class N64_OT_anim_load_bin(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def execute(self, context):
-        arm = next((o for o in context.scene.objects if o.type == 'ARMATURE' and 'n64_hidden_parts' in o.keys()), None)
+        arm = _scene_fighter(context)
         if arm is None:
             self.report({'ERROR'}, 'No N64 fighter armature in this scene')
             return {'CANCELLED'}
@@ -2227,7 +2227,7 @@ class N64_OT_anim_save_bin(bpy.types.Operator):
 
     @staticmethod
     def _arm(context):
-        return next((o for o in context.scene.objects if o.type == 'ARMATURE' and 'n64_hidden_parts' in o.keys()), None)
+        return _scene_fighter(context)
 
     def invoke(self, context, event):
         import json
@@ -3625,6 +3625,15 @@ class N64_PT_collision_tools(bpy.types.Panel):
         elif act.get('n64_gamedata') == 'collision_group':
             group = _line_group(act) or int(act.get('n64_collision_group', 1))
             lay.label(text=f'{act.name}: edit the mesh as collision edges', icon='MESH_DATA')
+            joint = f'L1_joint_{group:02d}'
+            n_meshes = len(_joint_meshes(context, 1, group)) if _stage_arm(context) is not None else 0
+            box = lay.box()
+            box.label(text=f'Moves / hides with layer 1 joint {group} (bone {joint})', icon='BONE_DATA')
+            box.label(text=f'{n_meshes} stage mesh(es) on that joint move with it; hazard code toggles '
+                           f'group {group} by its number')
+            if _stage_arm(context) is not None and context.scene.get('n64_kind') == 'stage':
+                op = box.operator('n64.stage_select', text=f'Select joint {group}', icon='RESTRICT_SELECT_OFF')
+                op.joint = joint
             if context.mode == 'EDIT_MESH':
                 selection = _collision_edit_selection(context)
                 if selection is None:
@@ -4015,6 +4024,13 @@ JOINT_BONE_PROPS = _joint_bone_props()
 ARMATURE_PROPS = _armature_props()
 
 
+def _scene_fighter(context):
+    """The scene's N64 fighter armature: the one named "fighter" (the export's), else the first one
+    carrying its custom properties (copies of it, e.g. a retarget rig's CLONE, have them too)."""
+    arms = [o for o in context.scene.objects if o.type == 'ARMATURE' and 'n64_hidden_parts' in o.keys()]
+    return next((o for o in arms if o.name == 'fighter'), arms[0] if arms else None)
+
+
 def _fighter_armature(context):
     ob = context.object
     if ob is not None and ob.type == 'ARMATURE' and _has_joint_attrs(ob):
@@ -4161,6 +4177,8 @@ class N64_PT_bone_joint(bpy.types.Panel):
             hb.operator('n64.hidden_part_remove', icon='X')
         elif g >= 1:
             hb.operator('n64.hidden_part_add', icon='HIDE_OFF')
+        if g >= 4:
+            draw_joint_materials(lay, context, arm, g - 4)
         if g >= 4 and bpy.data.collections.get('Model parts') is not None:
             draw_part_variants(lay, context.scene, g - 4)
 
@@ -4694,6 +4712,35 @@ class N64_OT_alt_texture_add(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class N64_OT_alt_texture_slot(bpy.types.Operator):
+    bl_idname = 'n64.alt_texture_slot'
+    bl_label = 'Make Alternate Texture'
+    bl_description = ('This material becomes an alternate texture (a texture part: a free one of the game\'s 2): '
+                      'moveset event 0x2B then picks its image; add images in the 3D View > N64 sidebar')
+    bl_options = {'UNDO'}
+    joint: bpy.props.IntProperty()
+    mobj: bpy.props.IntProperty()
+
+    def execute(self, context):
+        arm = next((o for o in context.scene.objects if _has_joint_attrs(o)), None)
+        if arm is None:
+            return {'CANCELLED'}
+        ad = arm.data
+        k = next((k for k in range(2) if not ad.get(f'n64_texpart_{k}_joint')), None)
+        if k is None:
+            self.report({'ERROR'}, 'The game has 2 alternate textures and both are used (Armature > N64 Fighter '
+                                   'Joints: clear one\'s joint first)')
+            return {'CANCELLED'}
+        man = _manifest(context.scene)
+        lo = ((man.get('mobj_order') or {}).get('lo') or {}).get(str(self.joint)) or []
+        ad[f'n64_texpart_{k}_joint'] = f'joint_{self.joint:02d}'
+        ad[f'n64_texpart_{k}_hi'] = self.mobj
+        ad[f'n64_texpart_{k}_lo'] = self.mobj if self.mobj < len(lo) else 0
+        self.report({'INFO'}, f'Alternate texture {k + 1}: joint_{self.joint:02d} material {self.mobj} '
+                              f'(moveset event 0x2B part {k}); add images in the N64 sidebar')
+        return {'FINISHED'}
+
+
 class N64_OT_alt_texture_remove(bpy.types.Operator):
     bl_idname = 'n64.alt_texture_remove'
     bl_label = 'Remove Alternate Texture'
@@ -4726,6 +4773,30 @@ class N64_OT_alt_texture_remove(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def draw_joint_materials(lay, context, arm, j):
+    """The joint's materials (its MObj list order: what texture parts index) and which are alternate
+    textures."""
+    man = _manifest(context.scene)
+    names = ((man.get('mobj_order') or {}).get('hi') or {}).get(str(j)) or []
+    if not names:
+        return
+    ad = arm.data
+    slots = {(ad.get(f'n64_texpart_{k}_joint'), int(ad.get(f'n64_texpart_{k}_hi', 0))): k for k in range(2)
+             if ad.get(f'n64_texpart_{k}_joint')}
+    box = lay.box()
+    box.label(text='Materials (alternate textures)', icon='MATERIAL')
+    for i, n in enumerate(names):
+        r = box.row(align=True)
+        cnt = len(list_images(man, n)) if n else 0
+        r.label(text=f'{i}: {n or "(unused)"}' + (f'  {cnt} images' if cnt > 1 else ''))
+        k = slots.get((f'joint_{j:02d}', i))
+        if k is not None:
+            r.label(text=f'Alternate texture {k + 1}', icon='IMAGE_DATA')
+        elif n:
+            op = r.operator('n64.alt_texture_slot', text='Make Alternate Texture', icon='ADD')
+            op.joint, op.mobj = j, i
+
+
 def draw_part_variants(lay, scene, j):
     """The joint's model part variants: show (body / nothing / each), select, add, remove."""
     have = part_objects(j)
@@ -4749,6 +4820,215 @@ def draw_part_variants(lay, scene, j):
     if have:
         op = r.operator('n64.part_add', text=f'Add (copy {max(have)})', icon='DUPLICATE')
         op.joint, op.source = j, max(have)
+
+
+# -- reference items / opponent (blend_reference.py): show, pick the opponent's animation, hold joints
+
+HOLD_LABELS = {'light': 'Light item joint', 'heavy': 'Heavy item joint'}
+
+
+def _ref_items():
+    """[(label, collection)] under Reference > Items."""
+    c = bpy.data.collections.get('Items')
+    return [(ch.name, ch) for ch in c.children] if c is not None else []
+
+
+def _lc(name):
+    return _find_layer_collection(bpy.context.view_layer.layer_collection, name)
+
+
+def _ref_shown():
+    """(shown item label or None, opponent shown)."""
+    ref, items, opp = _lc('Reference'), _lc('Items'), _lc('Opponent')
+    if ref is None or ref.hide_viewport:
+        return None, False
+    item = None
+    if items is not None and not items.hide_viewport:
+        item = next((lab for lab, _ in _ref_items() if _lc(lab) is not None and not _lc(lab).hide_viewport), None)
+    return item, opp is not None and not opp.hide_viewport
+
+
+def apply_reference(item, opponent):
+    """Show one reference item (None: none) and / or the opponent; the Reference collection only
+    while something is shown."""
+    for lab, _ in _ref_items():
+        lc = _lc(lab)
+        if lc is not None:
+            lc.hide_viewport = lab != item
+    for name, on in (('Items', item is not None), ('Opponent', opponent)):
+        lc = _lc(name)
+        if lc is not None:
+            lc.hide_viewport = not on
+    ref = _lc('Reference')
+    if ref is not None:
+        ref.hide_viewport = not (item is not None or opponent)
+
+
+def _hold_empty(key):
+    lab = HOLD_LABELS[key]
+    return next((o for o in bpy.data.objects if o.type == 'EMPTY' and o.name.startswith(lab)), None)
+
+
+def _hold_bone(e):
+    c = next((c for c in e.constraints if c.type == 'CHILD_OF'), None) if e is not None else None
+    return c.subtarget if c is not None else None
+
+
+def _opponent_arm():
+    return bpy.data.objects.get('Opponent')
+
+
+def _opp_actions(self=None, context=None):
+    acts = sorted(a.name for a in bpy.data.actions if a.name.startswith('Opponent: '))
+    _opp_actions.items = [(a, a.split(': ', 1)[1], f'The opponent plays {a.split(": ", 1)[1]}') for a in acts] \
+        or [('NONE', '(none)', '')]
+    return _opp_actions.items
+
+
+def _opp_action_get(self):
+    arm = _opponent_arm()
+    act = arm.animation_data.action if arm is not None and arm.animation_data else None
+    names = [x[0] for x in _opp_actions()]
+    return names.index(act.name) if act is not None and act.name in names else 0
+
+
+def _opp_action_set(self, i):
+    arm = _opponent_arm()
+    items = _opp_actions()
+    act = bpy.data.actions.get(items[i][0]) if 0 <= i < len(items) else None
+    if arm is None or act is None:
+        return
+    ad = arm.animation_data or arm.animation_data_create()
+    ad.action = act
+    if hasattr(ad, 'action_slot') and ad.action_slot is None and getattr(act, 'slots', None):
+        ad.action_slot = act.slots[0]
+
+
+class N64_OT_ref_item_show(bpy.types.Operator):
+    bl_idname = 'n64.ref_item_show'
+    bl_label = 'Show Reference Item'
+    bl_description = 'Show this item held by the fighter (on its hold joint, following the animation); again: hide it'
+    bl_options = {'UNDO'}
+    item: bpy.props.StringProperty()
+
+    def execute(self, context):
+        cur, opp = _ref_shown()
+        apply_reference(None if (not self.item or self.item == cur) else self.item, opp)
+        return {'FINISHED'}
+
+
+class N64_OT_ref_opponent_toggle(bpy.types.Operator):
+    bl_idname = 'n64.ref_opponent_toggle'
+    bl_label = 'Show Grabbed Opponent'
+    bl_description = 'Show / hide the grabbed opponent (on the heavy item joint, playing the picked thrown animation)'
+    bl_options = {'UNDO'}
+
+    def execute(self, context):
+        cur, opp = _ref_shown()
+        apply_reference(cur, not opp)
+        return {'FINISHED'}
+
+
+class N64_OT_ref_select_hold(bpy.types.Operator):
+    bl_idname = 'n64.ref_select_hold'
+    bl_label = 'Select Hold Joint'
+    bl_description = 'Select the bone this item joint is (Pose Mode)'
+    bl_options = {'UNDO'}
+    bone: bpy.props.StringProperty()
+
+    def execute(self, context):
+        arm = next((o for o in context.scene.objects if _has_joint_attrs(o)), None)
+        if arm is None or self.bone not in arm.data.bones:
+            return {'CANCELLED'}
+        if context.object is not None and context.object.mode != 'OBJECT' and context.object != arm:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for o in context.view_layer.objects:
+            o.select_set(False)
+        arm.hide_set(False)
+        arm.select_set(True)
+        context.view_layer.objects.active = arm
+        bpy.ops.object.mode_set(mode='POSE')
+        for pb in arm.pose.bones:
+            on = pb.name == self.bone
+            try:
+                pb.bone.select = on
+            except AttributeError:                   # Blender 5: selection is the pose bone's
+                pb.select = on
+        b = arm.data.bones[self.bone]
+        b.hide = False
+        arm.data.bones.active = b
+        return {'FINISHED'}
+
+
+class N64_OT_ref_hold_sync(bpy.types.Operator):
+    bl_idname = 'n64.ref_hold_sync'
+    bl_label = 'Move Reference to Item Joint'
+    bl_description = ('Put the reference item / opponent on the item joint Armature > N64 Fighter Joints has now '
+                      '(its frame: the game joint\'s rest, without scale)')
+    bl_options = {'UNDO'}
+    key: bpy.props.StringProperty()
+
+    def execute(self, context):
+        import sys
+        from mathutils import Matrix
+        arm = next((o for o in context.scene.objects if _has_joint_attrs(o)), None)
+        e = _hold_empty(self.key)
+        bone = arm.data.get(f'n64_item_{self.key}') if arm is not None else None
+        c = next((c for c in e.constraints if c.type == 'CHILD_OF'), None) if e is not None else None
+        if c is None or not bone or bone not in arm.data.bones:
+            return {'CANCELLED'}
+        d = context.scene.get('n64_tools_dir') or os.path.dirname(os.path.abspath(__file__))
+        if d not in sys.path:
+            sys.path.insert(0, d)
+        import blend_gamespace as BGS
+        gs = BGS._GameSpace.make(os.path.normpath(bpy.path.abspath(context.scene.get('n64_export_dir', '//'))))
+        if gs is None or bone not in gs.corr:
+            self.report({'ERROR'}, 'Needs the export\'s model.gltf (the joints\' own axes)')
+            return {'CANCELLED'}
+        b = arm.data.bones[bone]
+        A = arm.matrix_world.copy()
+        j_rot = (b.matrix_local.to_3x3().normalized() @ gs.corr[bone].to_3x3().inverted()).normalized()
+        G = Matrix.LocRotScale(b.head_local, j_rot.to_quaternion(), None)      # the joint's rest frame
+        s = e.matrix_basis.to_scale()                                           # (1 / size, as built)
+        R = (A @ b.matrix_local).normalized()
+        R = Matrix.LocRotScale(R.to_translation(), R.to_quaternion(), None)
+        c.subtarget = bone
+        c.inverse_matrix = R.inverted()
+        e.matrix_basis = A @ G @ Matrix.Diagonal((*s, 1.0))
+        e.name = f'{HOLD_LABELS[self.key]} ({bone})'
+        self.report({'INFO'}, f'{HOLD_LABELS[self.key]}: now on {bone}')
+        return {'FINISHED'}
+
+
+def draw_reference(lay, context):
+    if bpy.data.collections.get('Reference') is None:
+        return
+    item, opp = _ref_shown()
+    arm = next((o for o in context.scene.objects if _has_joint_attrs(o)), None)
+    lay.label(text='Reference (not imported)', icon='GHOST_ENABLED')
+    holds = {}
+    for key in ('light', 'heavy'):
+        e = _hold_empty(key)
+        holds[key] = (e, _hold_bone(e), arm.data.get(f'n64_item_{key}') if arm is not None else None)
+    col = lay.column(align=True)
+    for lab, c in _ref_items():
+        key = 'heavy' if lab in ('Crate', 'Barrel') else 'light'
+        row = col.row(align=True)
+        row.operator('n64.ref_item_show', text=lab, depress=lab == item,
+                     icon='HIDE_OFF' if lab == item else 'HIDE_ON').item = lab
+        bone = holds[key][1]
+        if bone:
+            row.operator('n64.ref_select_hold', text=bone, icon='BONE_DATA').bone = bone
+    row = lay.row(align=True)
+    row.operator('n64.ref_opponent_toggle', text='Grabbed Opponent', depress=opp,
+                 icon='HIDE_OFF' if opp else 'HIDE_ON')
+    if _opponent_arm() is not None:
+        row.prop(context.scene, 'n64ui_opponent_action', text='')
+    for key, (e, bone, want) in holds.items():
+        if e is not None and want and bone and want != bone:
+            r = lay.row()
+            r.label(text=f'{key.capitalize()} item joint is {want} now', icon='ERROR')
+            r.operator('n64.ref_hold_sync', text=f'Move to {want}').key = key
 
 
 class N64_PT_fighter_view(bpy.types.Panel):
@@ -4792,9 +5072,12 @@ class N64_PT_fighter_view(bpy.types.Panel):
                 if any(len(frame_nodes(bpy.data.materials[b])) > len((man['materials'].get(b) or {}).get('images') or [])
                        for b in mats if b in bpy.data.materials):
                     r.operator('n64.alt_texture_remove', text='Remove Last Added', icon='X').part = tp['index']
-                if n_img <= 1:
-                    # the part points at a material without an image list: nothing to switch (in the
-                    # game either); point out the joint's materials that have one
+                if n_img == 1:
+                    lay.label(text='One image: Add makes more (the import gives the material an image list)',
+                              icon='INFO')
+                elif n_img < 1:
+                    # the part points at a material without an image: nothing to switch (in the game
+                    # either); point out the joint's materials that have a list
                     others = [x for x in joint_image_lists(man, tp['joint'])
                               if x[0] not in {t['mobj_hi'] for t in tps if t['joint'] == tp['joint']}]
                     box = lay.box()
@@ -4814,6 +5097,912 @@ class N64_PT_fighter_view(bpy.types.Panel):
                 for v, text in [(-2, 'Body'), (-1, 'None')] + [(v, str(v)) for v in sorted(part_objects(j))]:
                     op = row.operator('n64.part_show', text=text, depress=cur_v == v)
                     op.joint, op.variant = j, v
+        draw_reference(lay, context)
+
+
+# ---- write the game files from Blender: ssb64_model.py import into a folder to copy -------------
+# Runs with Blender's own Python (sandboxed Blender, e.g. the Flatpak, can't run the system's) and
+# the Pillow / PyYAML the tools need, installed once into Blender's user scripts folder.
+
+_BUILD = {'proc': None, 'log': None, 'out': None, 'status': '', 'files': []}
+BUILD_MARKER = '.n64_game_files'
+
+
+def _deps_dir():
+    return bpy.utils.user_resource('SCRIPTS', path='ssb64_model_libs', create=True)
+
+
+def _deps_ok():
+    d = _deps_dir()
+    return os.path.isdir(os.path.join(d, 'PIL')) and os.path.isdir(os.path.join(d, 'yaml'))
+
+
+def _tools_dir(scene):
+    return scene.get('n64_tools_dir') or os.path.dirname(os.path.abspath(__file__))
+
+
+def _build_out(scene):
+    return os.path.normpath(bpy.path.abspath(scene.get('n64_build_dir', '//to_project')))
+
+
+def _build_dir_get(self):
+    return self.get('n64_build_dir', '//to_project')
+
+
+def _build_dir_set(self, v):
+    self['n64_build_dir'] = v
+
+
+class N64_OT_install_tools(bpy.types.Operator):
+    bl_idname = 'n64.install_tools'
+    bl_label = 'Install Tools'
+    bl_description = ('Install Pillow and PyYAML (what the import needs) for Blender\'s Python, with pip, into '
+                      'Blender\'s user scripts folder (ssb64_model_libs); needs the internet once')
+
+    def execute(self, context):
+        import subprocess
+        import sys
+        cmd = [sys.executable, '-m', 'pip', 'install', '--disable-pip-version-check', '--upgrade',
+               '--target', _deps_dir(), 'pillow', 'pyyaml']
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 or not _deps_ok():
+            self.report({'ERROR'}, 'pip failed: ' + (r.stderr or r.stdout).strip().splitlines()[-1:][0]
+                        if (r.stderr or r.stdout).strip() else 'pip failed')
+            return {'CANCELLED'}
+        self.report({'INFO'}, f'Installed into {_deps_dir()}')
+        return {'FINISHED'}
+
+
+def _build_poll():
+    b = _BUILD
+    p = b['proc']
+    if p is None:
+        return None
+    if p.poll() is None:
+        b['status'] = 'running'
+        _redraw_n64()
+        return 0.5
+    b['log_fh'].close()
+    out = b['out']
+    if p.returncode == 0:
+        b['files'] = sorted(os.path.relpath(os.path.join(r, f), out) for r, _, fs in os.walk(out) for f in fs
+                            if f not in (BUILD_MARKER, 'import_log.txt'))
+        b['status'] = 'done'
+    else:
+        b['status'] = 'failed'
+        try:
+            tail = [ln for ln in open(b['log'], encoding='utf-8', errors='replace').read().splitlines() if ln.strip()]
+            b['error'] = tail[-1] if tail else f'exit code {p.returncode}'
+        except OSError:
+            b['error'] = f'exit code {p.returncode}'
+    b['proc'] = None
+    _redraw_n64()
+    return None
+
+
+def _redraw_n64():
+    for win in bpy.context.window_manager.windows:
+        for area in win.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+
+
+class N64_OT_write_game_files(bpy.types.Operator):
+    bl_idname = 'n64.write_game_files'
+    bl_label = 'Write Game Files'
+    bl_description = ('Save, then run the import (ssb64_model.py import) into the folder below: every file to copy '
+                      'into the character / stage folder (main.bin, character.bin, main_reqlist.txt, config.yaml '
+                      'when it changed, the edited animations, shield pose, Kirby hat...)')
+    everything: bpy.props.BoolProperty(
+        name='Everything', options={'SKIP_SAVE'},
+        description='Also every animation with its own file (re-encoded from Blender, edited or not), the shield '
+                    'pose file and config.yaml even when unchanged (import --all)')
+
+    @classmethod
+    def description(cls, context, props):
+        if props.everything:
+            return ('Save, then write a full set of files into the folder below: main.bin, character.bin, '
+                    'main_reqlist.txt, config.yaml, every animation with its own file (animations/*.bin, '
+                    're-encoded from Blender), shield_pose.bin, Kirby hat... (import --all)')
+        return cls.bl_description
+
+    @classmethod
+    def poll(cls, context):
+        return _BUILD['proc'] is None and bool(bpy.data.filepath)
+
+    def execute(self, context):
+        import shutil
+        import subprocess
+        import sys
+        sc = context.scene
+        if not _deps_ok():
+            self.report({'ERROR'}, 'Install the tools first (Pillow, PyYAML for Blender\'s Python)')
+            return {'CANCELLED'}
+        out = _build_out(sc)
+        if os.path.isdir(out) and os.listdir(out):
+            if not os.path.exists(os.path.join(out, BUILD_MARKER)):
+                self.report({'ERROR'}, f'{out} has other files: pick an empty folder (or one this button made)')
+                return {'CANCELLED'}
+            shutil.rmtree(out)                  # (this button's: the last run's files go)
+        os.makedirs(out, exist_ok=True)
+        open(os.path.join(out, BUILD_MARKER), 'w').write('written by Blender > N64 > Write Game Files\n')
+        for img in bpy.data.images:             # (painted, not saved yet: the import reads the files)
+            if img.is_dirty and img.filepath:
+                img.save()
+        bpy.ops.wm.save_mainfile()
+        export_dir = os.path.normpath(bpy.path.abspath(sc.get('n64_export_dir', '//')))
+        env = dict(os.environ)
+        env['PYTHONPATH'] = os.pathsep.join([_deps_dir()] + ([env['PYTHONPATH']] if env.get('PYTHONPATH') else []))
+        env['BLENDER'] = bpy.app.binary_path
+        cmd = [sys.executable, os.path.join(_tools_dir(sc), 'ssb64_model.py'), 'import', export_dir, '--out', out] \
+            + (['--all'] if self.everything else [])
+        log = os.path.join(out, 'import_log.txt')
+        fh = open(log, 'w', encoding='utf-8')
+        fh.write(' '.join(cmd) + '\n\n')
+        fh.flush()
+        _BUILD.update(proc=subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env), log=log,
+                      log_fh=fh, out=out, status='running', files=[], error='')
+        bpy.app.timers.register(_build_poll, first_interval=0.5)
+        return {'FINISHED'}
+
+
+class N64_OT_open_path(bpy.types.Operator):
+    bl_idname = 'n64.open_path'
+    bl_label = 'Open'
+    bl_description = 'Open it with the system\'s file manager / editor'
+    path: bpy.props.StringProperty()
+
+    def execute(self, context):
+        bpy.ops.wm.path_open(filepath=self.path)
+        return {'FINISHED'}
+
+
+class N64_PT_game_files(bpy.types.Panel):
+    bl_label = 'N64 Game Files'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'N64'
+
+    @classmethod
+    def poll(cls, context):
+        return 'n64_export_dir' in context.scene.keys()
+
+    def draw(self, context):
+        lay = self.layout
+        sc = context.scene
+        if not _deps_ok():
+            lay.label(text='Blender\'s Python needs Pillow + PyYAML', icon='ERROR')
+            lay.operator('n64.install_tools', icon='IMPORT')
+        lay.prop(sc, 'n64ui_build_dir', text='Folder')
+        col = lay.column(align=True)
+        col.operator('n64.write_game_files', icon='EXPORT').everything = False
+        col.operator('n64.write_game_files', text='Write All (Every Animation)', icon='PACKAGE').everything = True
+        b = _BUILD
+        if b['status'] == 'running':
+            lay.label(text='Writing... (Blender reads the saved .blend)', icon='SORTTIME')
+        elif b['status'] == 'done':
+            box = lay.box()
+            box.label(text=f'{len(b["files"])} files to copy into the character / stage folder:', icon='CHECKMARK')
+            for f in b['files'][:20]:
+                box.label(text=f)
+            if len(b['files']) > 20:
+                box.label(text=f'... {len(b["files"]) - 20} more')
+        elif b['status'] == 'failed':
+            lay.label(text='Failed: ' + b.get('error', ''), icon='ERROR')
+        if b['status'] in ('done', 'failed') and b.get('out'):
+            r = lay.row(align=True)
+            r.operator('n64.open_path', text='Open Folder', icon='FILE_FOLDER').path = b['out']
+            r.operator('n64.open_path', text='Log', icon='TEXT').path = b['log']
+
+
+# ---------------------------------------------------------------- stage layers / joints (3D View > N64)
+# Big stage edits from Blender: see a layer's joints (draw order, parents, meshes, animations), add joints
+# (import_stage.add_new_joints writes them), put meshes on a joint, make keys linear.
+STAGE_LAYER_INFO = {0: 'Background: painted in joint order, no depth test',
+                    1: 'Stage: depth-buffered (with the fighters)',
+                    2: 'Foreground: painted over everything, in joint order',
+                    3: 'Foreground: painted over everything, in joint order'}
+
+
+def _stage_arm(context):
+    import re
+    if context.scene.get('n64_kind') != 'stage':
+        return None
+    return next((o for o in context.scene.objects if o.type == 'ARMATURE' and not o.get('n64_reference')
+                 and any(re.match(r'L\d+_joint_\d+$', b.name) for b in o.data.bones)), None)
+
+
+def _stage_joints(arm, layer):
+    """[(index, bone)] of a layer, by index."""
+    import re
+    out = []
+    for b in arm.data.bones:
+        m = re.match(rf'L{layer}_joint_(\d+)$', b.name)
+        if m:
+            out.append((int(m.group(1)), b))
+    return sorted(out, key=lambda t: t[0])
+
+
+def _stage_layers(arm):
+    import re
+    return sorted({int(m.group(1)) for b in arm.data.bones for m in [re.match(r'L(\d+)_joint_\d+$', b.name)] if m})
+
+
+def _joint_parent_index(bone, layer):
+    import re
+    p = bone.parent
+    m = re.match(rf'L{layer}_joint_(\d+)$', p.name) if p is not None else None
+    return int(m.group(1)) if m else (None if bone.name.endswith('_00') else 0)
+
+
+def _joint_depth(bone, layer):
+    d, b = 0, bone
+    while b is not None and not b.name.endswith('_joint_00'):
+        b = b.parent if (b.parent is not None and b.parent.name.startswith(f'L{layer}_joint_')) else None
+        d += 1
+    return d
+
+
+def _layer_collection(layer):
+    return next((c for c in bpy.data.collections if c.name.startswith(f'Layer {layer}')), None)
+
+
+def _joint_meshes(context, layer, index):
+    return [o for o in context.scene.objects if o.type == 'MESH' and o.get('stage_layer') == layer
+            and o.get('stage_room') == index]
+
+
+def _curved_keys(arm, name):
+    return any(kp.interpolation not in ('LINEAR', 'CONSTANT') for fc in _bone_fcurves(arm, name)
+               for kp in fc.keyframe_points)
+
+
+def _export_joint_names():
+    """The export's joint names (model.gltf next to the .blend): the stage's original joints."""
+    import os
+    import json
+    path = os.path.join(os.path.dirname(bpy.data.filepath), 'model.gltf')
+    if not os.path.exists(path):
+        return set()
+    return {n.get('name') for n in json.load(open(path)).get('nodes', [])}
+
+
+def _stamp_layer(arm, layer):
+    """Before a layer's first edit: each joint bone remembers which original joint it is (n64_joint_orig,
+    -1: new), so it can be renumbered (blend_to_gltf joint_map)."""
+    have = None
+    for i, b in _stage_joints(arm, layer):
+        if 'n64_joint_orig' not in b.keys():
+            have = _export_joint_names() if have is None else have
+            b['n64_joint_orig'] = i if (b.name in have and not b.get('n64_new_joint')) else -1
+
+
+def _collision_locked(arm, layer):
+    """Layer 1's joints 0..N carry the collision groups (by index): they stay where they are."""
+    if layer != 1:
+        return set()
+    return {f'L1_joint_{i:02d}' for i in range(_collision_group_count() + 1)}
+
+
+def _collision_group_count():
+    """The stage's collision group (yakumono) count: the export's (scene n64_collision_groups, what
+    the import checks), else the highest Collision Group mesh."""
+    import re
+    n = bpy.context.scene.get('n64_collision_groups')
+    if n is not None:
+        return int(n)
+    groups = [int(m.group(1)) for o in bpy.data.objects for m in [re.match(r'Collision Group (\d+)$', o.name)] if m]
+    return max(groups, default=0)
+
+
+def _collision_group_lines(group):
+    """The edges of collision group N's mesh (0: none / no mesh)."""
+    ob = bpy.data.objects.get(f'Collision Group {group}')
+    return len(ob.data.edges) if ob is not None and ob.type == 'MESH' else 0
+
+
+def _joint_parent_bone(arm, layer, b):
+    root = arm.data.bones.get(f'L{layer}_joint_00')
+    if b == root:
+        return None
+    p = b.parent
+    return p if (p is not None and p.name.startswith(f'L{layer}_joint_')) else root
+
+
+def _descendants(arm, layer, b):
+    out, todo = set(), [b]
+    joints = [x for _, x in _stage_joints(arm, layer)]
+    while todo:
+        cur = todo.pop()
+        for c in joints:
+            if _joint_parent_bone(arm, layer, c) == cur and c.name not in out:
+                out.add(c.name)
+                todo.append(c)
+    return out
+
+
+def _renumber(context, arm, layer, key=None):
+    """Renumber a layer's joints depth first (the order the game stores them: each joint's subtree
+    right after it), children in their current order (key: bone name -> sort value overrides). Renames
+    the bones (Blender renames their vertex groups and animation paths) and the meshes' stage_room.
+    -> an error string, or None."""
+    joints = _stage_joints(arm, layer)
+    idx = {b.name: i for i, b in joints}
+    root = arm.data.bones.get(f'L{layer}_joint_00')
+    kids = {}
+    for _, b in joints:
+        p = _joint_parent_bone(arm, layer, b)
+        if p is not None:
+            kids.setdefault(p.name, []).append(b)
+    order = []
+
+    def walk(b):
+        order.append(b)
+        for c in sorted(kids.get(b.name, []), key=lambda c: (key or {}).get(c.name, idx[c.name])):
+            walk(c)
+    walk(root)
+    new = {b.name: f'L{layer}_joint_{k:02d}' for k, b in enumerate(order)}
+    for name in _collision_locked(arm, layer):
+        if name in new and new[name] != name:
+            return f'{name} carries a collision group: layer 1\'s joints 0..N stay where they are'
+    if all(a == b for a, b in new.items()):
+        return None
+    _drop_unused_groups(context, layer)    # (renaming a bone renames its vertex groups: no name clashes)
+    room = {idx[old]: int(n.split('_')[-1]) for old, n in new.items()}
+    for o in context.scene.objects:
+        if o.type == 'MESH' and o.get('stage_layer') == layer and o.get('stage_room') in room:
+            o['stage_room'] = room[o['stage_room']]
+    for b in order:
+        b.name = '__n64_tmp__' + b.name
+    for b in order:
+        b.name = new[b.name[len('__n64_tmp__'):]]
+    cur = context.scene.get('n64_stage_joint')
+    if cur in new:
+        context.scene['n64_stage_joint'] = new[cur]
+    return None
+
+
+def _drop_unused_groups(context, layer):
+    """Remove the layer's joint vertex groups no vertex uses (exported meshes carry one per bone)."""
+    pre = f'L{layer}_joint_'
+    for o in context.scene.objects:
+        if o.type != 'MESH':
+            continue
+        used = {g.group for v in o.data.vertices for g in v.groups if g.weight > 0}
+        for vg in [vg for vg in o.vertex_groups if vg.name.startswith(pre) and vg.index not in used]:
+            o.vertex_groups.remove(vg)
+
+
+def _edit_bones(context, arm):
+    prev_mode, prev_active = arm.mode, context.view_layer.objects.active
+    context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode='EDIT')
+    return prev_mode, prev_active
+
+
+def _end_edit_bones(context, arm, prev):
+    bpy.ops.object.mode_set(mode='OBJECT')
+    if prev[0] == 'POSE':
+        bpy.ops.object.mode_set(mode='POSE')
+    context.view_layer.objects.active = prev[1]
+
+
+def _parent_items(self, context):
+    arm = _stage_arm(context)
+    if arm is None:
+        return [('', 'none', '')]
+    skip = set()
+    if getattr(self, 'joint', ''):
+        b = arm.data.bones.get(self.joint)
+        if b is not None:
+            skip = {b.name} | _descendants(arm, self.layer, b)
+    return [(b.name, b.name.split('_')[-1].lstrip('0') or '0', f'Hang it from {b.name}')
+            for _, b in _stage_joints(arm, self.layer) if b.name not in skip]
+
+
+class N64_OT_stage_joint_add(bpy.types.Operator):
+    bl_idname = 'n64.stage_joint_add'
+    bl_label = 'Add Joint'
+    bl_description = ('A new joint, its parent\'s last child (joints are renumbered depth first: the game\'s order). '
+                      'No rest transform: it\'s placed by its animation')
+    bl_options = {'REGISTER', 'UNDO'}
+    layer: bpy.props.IntProperty(name='Layer', min=0, max=3)
+    joint: bpy.props.StringProperty(options={'HIDDEN'})
+    parent: bpy.props.EnumProperty(name='Parent', items=_parent_items)
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        arm = _stage_arm(context)
+        _stamp_layer(arm, self.layer)
+        joints = _stage_joints(arm, self.layer)
+        name = f'L{self.layer}_joint_{(joints[-1][0] + 1 if joints else 0):02d}'
+        prev = _edit_bones(context, arm)
+        eb = arm.data.edit_bones.new(name)
+        eb.head, eb.tail, eb.roll = (0, 0, 0), (0, 100, 0), 0.0
+        if self.parent:
+            eb.parent, eb.use_connect = arm.data.edit_bones[self.parent], False
+        _end_edit_bones(context, arm, prev)
+        b = arm.data.bones[name]
+        b['n64_new_joint'], b['n64_joint_orig'] = True, -1
+        err = _renumber(context, arm, self.layer, key={name: 1e9})
+        if err:
+            self.report({'ERROR'}, err)
+            return {'CANCELLED'}
+        context.scene['n64_stage_joint'] = b.name
+        self.report({'INFO'}, f'{b.name} added (parent {self.parent or "root"})')
+        return {'FINISHED'}
+
+
+class N64_OT_stage_joint_remove(bpy.types.Operator):
+    bl_idname = 'n64.stage_joint_remove'
+    bl_label = 'Remove Joint'
+    bl_description = ('Remove this joint (its children move up to its parent; later joints are renumbered). '
+                      'Its meshes must go first (Put On Joint, or delete them)')
+    bl_options = {'UNDO'}
+    joint: bpy.props.StringProperty()
+
+    def execute(self, context):
+        import re
+        arm = _stage_arm(context)
+        layer, index = (int(x) for x in re.match(r'L(\d+)_joint_(\d+)$', self.joint).groups())
+        if index == 0:
+            self.report({'ERROR'}, 'Joint 0 is the layer\'s root (remove the whole layer instead)')
+            return {'CANCELLED'}
+        if self.joint in _collision_locked(arm, layer):
+            self.report({'ERROR'}, f'{self.joint} carries a collision group')
+            return {'CANCELLED'}
+        if _joint_meshes(context, layer, index):
+            self.report({'ERROR'}, f'{self.joint} still has meshes: put them on another joint or delete them')
+            return {'CANCELLED'}
+        _stamp_layer(arm, layer)
+        fcs = anim_fcurves(arm)
+        for fc in _bone_fcurves(arm, self.joint):
+            fcs.remove(fc)
+        parent = _joint_parent_bone(arm, layer, arm.data.bones[self.joint])
+        prev = _edit_bones(context, arm)
+        eb = arm.data.edit_bones
+        for c in list(eb[self.joint].children):
+            c.parent = eb[parent.name]
+        eb.remove(eb[self.joint])
+        _end_edit_bones(context, arm, prev)
+        _drop_unused_groups(context, layer)
+        err = _renumber(context, arm, layer)
+        if err:
+            self.report({'ERROR'}, err)
+        return {'FINISHED'}
+
+
+class N64_OT_stage_joint_move(bpy.types.Operator):
+    bl_idname = 'n64.stage_joint_move'
+    bl_label = 'Move Joint'
+    bl_description = ('Move this joint (with its children) before / after its previous / next sibling: on painted '
+                      'layers, later joints draw over earlier ones')
+    bl_options = {'UNDO'}
+    joint: bpy.props.StringProperty()
+    direction: bpy.props.IntProperty(default=-1)
+
+    def execute(self, context):
+        import re
+        arm = _stage_arm(context)
+        layer = int(re.match(r'L(\d+)_', self.joint).group(1))
+        b = arm.data.bones[self.joint]
+        parent = _joint_parent_bone(arm, layer, b)
+        if parent is None:
+            return {'CANCELLED'}
+        sibs = [x for _, x in _stage_joints(arm, layer) if _joint_parent_bone(arm, layer, x) == parent]
+        k = sibs.index(b)
+        to = k + (1 if self.direction > 0 else -1)
+        if not 0 <= to < len(sibs):
+            return {'CANCELLED'}
+        _stamp_layer(arm, layer)
+        sibs[k], sibs[to] = sibs[to], sibs[k]
+        err = _renumber(context, arm, layer, key={x.name: i for i, x in enumerate(sibs)})
+        if err:
+            self.report({'ERROR'}, err)
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class N64_OT_stage_joint_parent(bpy.types.Operator):
+    bl_idname = 'n64.stage_joint_parent'
+    bl_label = 'Set Parent'
+    bl_description = ('Hang this joint (with its children) from another joint: it keeps its place in the world; '
+                      'joints are renumbered depth first')
+    bl_options = {'REGISTER', 'UNDO'}
+    joint: bpy.props.StringProperty(options={'HIDDEN'})
+    layer: bpy.props.IntProperty(options={'HIDDEN'})
+    parent: bpy.props.EnumProperty(name='Parent', items=_parent_items)
+
+    def invoke(self, context, event):
+        import re
+        self.layer = int(re.match(r'L(\d+)_', self.joint).group(1))
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        arm = _stage_arm(context)
+        if self.joint.endswith('_joint_00') or not self.parent:
+            return {'CANCELLED'}
+        if self.joint in _collision_locked(arm, self.layer):
+            self.report({'ERROR'}, f'{self.joint} carries a collision group')
+            return {'CANCELLED'}
+        _stamp_layer(arm, self.layer)
+        prev = _edit_bones(context, arm)
+        eb = arm.data.edit_bones
+        eb[self.joint].parent, eb[self.joint].use_connect = eb[self.parent], False
+        _end_edit_bones(context, arm, prev)
+        err = _renumber(context, arm, self.layer, key={self.joint: 1e9})
+        if err:
+            self.report({'ERROR'}, err)
+            return {'CANCELLED'}
+        return {'FINISHED'}
+
+
+class N64_OT_stage_layer_remove(bpy.types.Operator):
+    bl_idname = 'n64.stage_layer_remove'
+    bl_label = 'Remove Layer'
+    bl_description = ('Remove the whole layer (all its joints): the game then skips it (no objects for it at '
+                      'all). It must have no meshes left')
+    bl_options = {'UNDO'}
+    layer: bpy.props.IntProperty()
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
+
+    def execute(self, context):
+        arm = _stage_arm(context)
+        if self.layer in (0, 1):
+            self.report({'ERROR'}, 'Layer 0 heads the stage header\'s pointers, layer 1 carries the collision: '
+                                   'they stay (empty them instead)')
+            return {'CANCELLED'}
+        if any(o.type == 'MESH' and o.get('stage_layer') == self.layer for o in context.scene.objects):
+            self.report({'ERROR'}, f'Layer {self.layer} still has meshes')
+            return {'CANCELLED'}
+        names = [b.name for _, b in _stage_joints(arm, self.layer)]
+        fcs = anim_fcurves(arm)
+        for n in names:
+            for fc in _bone_fcurves(arm, n):
+                fcs.remove(fc)
+        prev = _edit_bones(context, arm)
+        for n in names:
+            arm.data.edit_bones.remove(arm.data.edit_bones[n])
+        _end_edit_bones(context, arm, prev)
+        self.report({'INFO'}, f'Layer {self.layer} removed ({len(names)} joints)')
+        return {'FINISHED'}
+
+
+def _joint_items(self, context):
+    arm = _stage_arm(context)
+    if arm is None:
+        return [('', 'none', '')]
+    return [(b.name, b.name, '') for layer in _stage_layers(arm) for _, b in _stage_joints(arm, layer)]
+
+
+class N64_OT_stage_assign(bpy.types.Operator):
+    bl_idname = 'n64.stage_assign'
+    bl_label = 'Put On Joint'
+    bl_description = ('Put the selected meshes on a stage joint: its layer (collection), the joint\'s vertex group '
+                      '(every vertex, weight 1) and the stage armature')
+    bl_options = {'REGISTER', 'UNDO'}
+    joint: bpy.props.EnumProperty(name='Joint', items=_joint_items)
+
+    def invoke(self, context, event):
+        cur = context.scene.get('n64_stage_joint')
+        if cur and cur in {i[0] for i in _joint_items(self, context)}:
+            self.joint = cur
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        import re
+        arm = _stage_arm(context)
+        m = re.match(r'L(\d+)_joint_(\d+)$', self.joint)
+        layer, index = int(m.group(1)), int(m.group(2))
+        coll = _layer_collection(layer)
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        for ob in meshes:
+            for c in list(ob.users_collection):
+                c.objects.unlink(ob)
+            coll.objects.link(ob)
+            ob.vertex_groups.clear()
+            vg = ob.vertex_groups.new(name=self.joint)
+            vg.add(list(range(len(ob.data.vertices))), 1.0, 'REPLACE')
+            md = next((x for x in ob.modifiers if x.type == 'ARMATURE'), None) or ob.modifiers.new('Armature', 'ARMATURE')
+            md.object = arm
+            if ob.parent is None:
+                mw = ob.matrix_world.copy()
+                ob.parent = arm
+                ob.matrix_world = mw
+            ob['stage_layer'], ob['stage_room'] = layer, index
+        context.scene['n64_stage_joint'] = self.joint
+        self.report({'INFO'}, f'{len(meshes)} mesh(es) on {self.joint}')
+        return {'FINISHED'}
+
+
+class N64_OT_stage_linear(bpy.types.Operator):
+    bl_idname = 'n64.stage_linear'
+    bl_label = 'Linear Keys'
+    bl_description = ('Make the joint\'s keyframes linear: the game stores straight segments as two keys; '
+                      'curves cost about a key per frame')
+    bl_options = {'UNDO'}
+    joint: bpy.props.StringProperty(description='The bone (empty: every stage joint)')
+
+    def execute(self, context):
+        arm = _stage_arm(context)
+        names = [self.joint] if self.joint else [b.name for layer in _stage_layers(arm) for _, b in _stage_joints(arm, layer)]
+        n = 0
+        for name in names:
+            for fc in _bone_fcurves(arm, name):
+                for kp in fc.keyframe_points:
+                    if kp.interpolation != 'CONSTANT':
+                        kp.interpolation = 'LINEAR'
+                        n += 1
+        self.report({'INFO'}, f'{n} keys made linear')
+        return {'FINISHED'}
+
+
+class N64_OT_stage_select(bpy.types.Operator):
+    bl_idname = 'n64.stage_select'
+    bl_label = 'Select Joint'
+    bl_description = 'Show this joint in Selected Joint'
+    bl_options = {'UNDO'}
+    joint: bpy.props.StringProperty()
+    what: bpy.props.EnumProperty(items=[('JOINT', 'Joint', 'Show it in Selected Joint'),
+                                        ('MESH', 'Meshes', 'Select its meshes (Object Mode)'),
+                                        ('BONE', 'Bone', 'Select its bone (Pose Mode on the armature: animate it)')],
+                                 default='JOINT')
+
+    @classmethod
+    def description(cls, context, props):
+        return {'MESH': 'Select this joint\'s meshes (Object Mode)',
+                'BONE': 'Select this joint\'s bone (Pose Mode on the stage armature: to animate it)'}.get(
+            props.what, 'Show this joint in Selected Joint')
+
+    def execute(self, context):
+        import re
+        arm = _stage_arm(context)
+        context.scene['n64_stage_joint'] = self.joint
+        if self.what == 'JOINT':
+            return {'FINISHED'}
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        for o in context.selected_objects:
+            o.select_set(False)
+        if self.what == 'MESH':
+            m = re.match(r'L(\d+)_joint_(\d+)$', self.joint)
+            meshes = _joint_meshes(context, int(m.group(1)), int(m.group(2)))
+            for o in meshes:
+                o.select_set(True)
+            if meshes:
+                context.view_layer.objects.active = meshes[0]
+            return {'FINISHED'}
+        arm.hide_set(False)
+        arm.select_set(True)
+        context.view_layer.objects.active = arm
+        bpy.ops.object.mode_set(mode='POSE')
+        sel_on_pose = not hasattr(bpy.types.Bone, 'select')      # (Blender 5: selection on pose bones)
+        for x in (arm.pose.bones if sel_on_pose else arm.data.bones):
+            x.select = False
+        (arm.pose.bones if sel_on_pose else arm.data.bones)[self.joint].select = True
+        arm.data.bones.active = arm.data.bones[self.joint]
+        return {'FINISHED'}
+
+
+def _joint_label(context, layer, index, b):
+    """What a joint is, for the tree: its name (n64_joint_label), else its meshes (exported ones are named
+    L<n>_j<NN>: their faces and material), else what it does."""
+    if b.get('n64_joint_label'):
+        return str(b['n64_joint_label'])
+    import re
+    names = []
+    for o in _joint_meshes(context, layer, index):
+        n = re.sub(r'^L\d+_j\d+_?', '', o.name)
+        if not n or re.fullmatch(r'\.\d+', n):
+            mat = next((sl.material.name for sl in o.material_slots if sl.material is not None), '')
+            n = f'{len(o.data.polygons)} faces' + (f', {mat}' if mat else '')
+        names.append(n)
+    if names:
+        return '; '.join(names[:2]) + (f' +{len(names) - 2}' if len(names) > 2 else '')
+    if index == 0:
+        return 'root'
+    kids = [c for c in b.children if c.name.startswith(f'L{layer}_joint_')]
+    pb = next((o.pose.bones.get(b.name) for o in bpy.data.objects if o.type == 'ARMATURE' and o.data == b.id_data), None)
+    if kids:
+        return 'group' + (' (moves)' if pb is not None and 'n64_anim_frames' in pb.keys() else '')
+    return 'empty'
+
+
+class N64_OT_stage_layer_fold(bpy.types.Operator):
+    bl_idname = 'n64.stage_layer_fold'
+    bl_label = 'Fold Layer'
+    bl_description = 'Show / hide this layer\'s joints'
+    layer: bpy.props.IntProperty()
+
+    def execute(self, context):
+        folded = set(context.scene.get('n64_stage_folded') or [])
+        folded ^= {self.layer}
+        context.scene['n64_stage_folded'] = sorted(folded)
+        return {'FINISHED'}
+
+
+class N64_OT_stage_joint_name(bpy.types.Operator):
+    bl_idname = 'n64.stage_joint_name'
+    bl_label = 'Name Joint'
+    bl_description = 'Give this joint a name for the panel (not stored in the game files)'
+    bl_options = {'UNDO'}
+    joint: bpy.props.StringProperty(options={'HIDDEN'})
+    name: bpy.props.StringProperty(name='Name')
+
+    def invoke(self, context, event):
+        b = _stage_arm(context).data.bones[self.joint]
+        self.name = str(b.get('n64_joint_label', ''))
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        b = _stage_arm(context).data.bones[self.joint]
+        if self.name.strip():
+            b['n64_joint_label'] = self.name.strip()
+        elif 'n64_joint_label' in b.keys():
+            del b['n64_joint_label']
+        return {'FINISHED'}
+
+
+class N64_PT_stage(bpy.types.Panel):
+    bl_label = 'N64 Stage'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'N64'
+
+    @classmethod
+    def poll(cls, context):
+        return _stage_arm(context) is not None
+
+    def draw(self, context):
+        lay = self.layout
+        arm = _stage_arm(context)
+        cur = context.scene.get('n64_stage_joint', '')
+        folded = set(context.scene.get('n64_stage_folded') or [])
+        for layer in _stage_layers(arm):
+            joints = _stage_joints(arm, layer)
+            box = lay.box()
+            head = box.row(align=True)
+            op = head.operator('n64.stage_layer_fold', text='', emboss=False,
+                               icon='DISCLOSURE_TRI_RIGHT' if layer in folded else 'DISCLOSURE_TRI_DOWN')
+            op.layer = layer
+            head.label(text=f'Layer {layer}  ({len(joints)} joints)', icon='RENDERLAYERS')
+            op = head.operator('n64.stage_joint_add', text='', icon='ADD')
+            op.layer = layer
+            if layer >= 2:
+                op = head.operator('n64.stage_layer_remove', text='', icon='TRASH')
+                op.layer = layer
+            if layer in folded:
+                continue
+            sub = box.column(align=True)
+            sub.scale_y = 0.8
+            sub.label(text=STAGE_LAYER_INFO.get(layer, ''))
+            if layer == 1 and _collision_group_count():
+                sub.label(text=f'Joints 1..{_collision_group_count()} carry collision groups 1..'
+                               f'{_collision_group_count()} (locked)', icon='MOD_PHYSICS')
+            col = box.column(align=True)
+            locked = _collision_locked(arm, layer)
+            for index, b in joints:
+                pb = arm.pose.bones.get(b.name)
+                meshes = _joint_meshes(context, layer, index)
+                animated = pb is not None and 'n64_anim_frames' in pb.keys()
+                r = col.row(align=True)
+                for _ in range(_joint_depth(b, layer)):             # the tree: one step per level
+                    r.label(text='', icon='BLANK1')
+                # two buttons: its meshes (a dot: none) and its bone; the name shows it in Selected Joint
+                if meshes:
+                    op = r.operator('n64.stage_select', text='', icon='MESH_DATA', emboss=False)
+                    op.joint, op.what = b.name, 'MESH'
+                else:
+                    r.label(text='', icon='DOT')
+                op = r.operator('n64.stage_select', text='', icon='BONE_DATA', emboss=False)
+                op.joint, op.what = b.name, 'BONE'
+                op = r.operator('n64.stage_select', text=f'{index}   {_joint_label(context, layer, index, b)}',
+                                emboss=b.name == cur, depress=b.name == cur)
+                op.joint, op.what = b.name, 'JOINT'
+                flags = r.row(align=True)
+                flags.alignment = 'RIGHT'
+                if b.get('n64_new_joint'):
+                    flags.label(text='', icon='ADD')
+                if animated:
+                    flags.label(text='', icon='ANIM')
+                if layer == 1 and 1 <= index <= _collision_group_count():
+                    flags.label(text='', icon='MOD_PHYSICS')
+                if b.name in locked or index == 0:
+                    flags.label(text='', icon='LOCKED')
+        row = lay.row(align=True)
+        row.operator('n64.stage_assign', icon='MESH_DATA')
+        op = row.operator('n64.stage_linear', text='All Keys Linear', icon='IPO_LINEAR')
+        op.joint = ''
+        legend = lay.column(align=True)
+        legend.scale_y = 0.7
+        legend.label(text='Mesh / bone icons select them (a dot: no mesh); the name shows the joint', icon='INFO')
+        legend.label(text='below. Right: animated, new, collision group, locked. Top to bottom = draw order.')
+
+
+class N64_PT_stage_joint(bpy.types.Panel):
+    bl_label = 'Selected Joint'
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'N64'
+    bl_parent_id = 'N64_PT_stage'
+
+    @classmethod
+    def poll(cls, context):
+        arm = _stage_arm(context)
+        return arm is not None and context.scene.get('n64_stage_joint', '') in arm.data.bones
+
+    def draw(self, context):
+        import re
+        lay = self.layout
+        arm = _stage_arm(context)
+        name = context.scene['n64_stage_joint']
+        b = arm.data.bones[name]
+        pb = arm.pose.bones.get(name)
+        layer, index = (int(x) for x in re.match(r'L(\d+)_joint_(\d+)$', name).groups())
+        joints = _stage_joints(arm, layer)
+        locked = name in _collision_locked(arm, layer) or index == 0
+        row = lay.row(align=True)
+        row.label(text=f'Joint {index}: {_joint_label(context, layer, index, b)}', icon='BONE_DATA')
+        op = row.operator('n64.stage_joint_name', text='', icon='GREASEPENCIL')
+        op.joint = name
+        col = lay.column(align=True)
+        parent = _joint_parent_bone(arm, layer, b)
+        col.label(text=f'Layer {layer}, bone {name}')
+        if parent is not None:
+            pi = int(parent.name.split('_')[-1])
+            col.label(text=f'Parent: joint {pi} ({_joint_label(context, layer, pi, parent)})')
+        kids = [i for i, x in joints if _joint_parent_bone(arm, layer, x) == b]
+        if kids:
+            col.label(text='Children: ' + ', '.join(str(i) for i in kids))
+        if layer != 1 and len(joints) > 1:
+            before = f'after joint {index - 1}' if index else 'first'
+            after = f', before joint {index + 1}' if index + 1 < len(joints) else ', last'
+            col.label(text=f'Painted {before}{after}')
+        box = lay.box()
+        meshes = _joint_meshes(context, layer, index)
+        box.label(text=f'Meshes ({len(meshes)})', icon='MESH_DATA')
+        for o in meshes[:6]:
+            box.label(text=f'  {o.name}  ({len(o.data.polygons)} faces)')
+        if len(meshes) > 6:
+            box.label(text=f'  +{len(meshes) - 6} more')
+        op = box.operator('n64.stage_assign', text='Put Selected Meshes Here', icon='IMPORT')
+        op.joint = name
+        box = lay.box()
+        if pb is not None and 'n64_anim_frames' in pb.keys():
+            box.label(text=f'Animated: {pb["n64_anim_frames"]} frames' + (', loops' if pb.get('n64_anim_loop') else ''),
+                      icon='ANIM')
+            if _curved_keys(arm, name):
+                sub = box.column(align=True)
+                sub.scale_y = 0.8
+                sub.label(text='Unchanged, the game keeps its own script. Edited: linear keys store')
+                r = sub.row()
+                r.label(text='as 2 per segment, curves up to one per frame')
+                op = r.operator('n64.stage_linear', text='Make Linear')
+                op.joint = name
+        else:
+            box.label(text='Not animated (keyframe it in Pose Mode)', icon='ANIM')
+        if layer == 1 and 1 <= index <= _collision_group_count():
+            lines = _collision_group_lines(index)
+            box = lay.box()
+            box.label(text=f'Collision group {index}: ' + (f'{lines} edges' if lines else 'empty'),
+                      icon='MOD_PHYSICS')
+            box.label(text='It moves / hides with this joint; hazards toggle it by its number')
+        if locked:
+            lay.label(text='Root joint: stays in place' if index == 0 else
+                      'Carries a collision group: stays in place', icon='LOCKED')
+            return
+        r = lay.row(align=True)
+        for icon, dirn, text in (('TRIA_UP', -1, 'Up'), ('TRIA_DOWN', 1, 'Down')):
+            op = r.operator('n64.stage_joint_move', text=text, icon=icon)
+            op.joint, op.direction = name, dirn
+        op = r.operator('n64.stage_joint_parent', text='Parent', icon='CON_CHILDOF')
+        op.joint = name
+        op = r.operator('n64.stage_joint_remove', text='Remove', icon='X')
+        op.joint = name
 
 
 CLASSES = (N64_OT_vs_view, N64_OT_joint_anim_set, N64_OT_joint_anim_remove, N64_PT_joint, N64_OT_anim_add, N64_OT_anim_remove, N64_OT_anim_settings, N64_OT_frame_add, N64_OT_frame_remove,
@@ -4823,7 +6012,13 @@ CLASSES = (N64_OT_vs_view, N64_OT_joint_anim_set, N64_OT_joint_anim_remove, N64_
            N64_PT_motion_flags, N64_OT_anim_load_bin, N64_OT_anim_save_bin,
            N64_OT_hidden_part_add, N64_OT_hidden_part_remove, N64_PT_bone_joint, N64_PT_fighter_joints,
            N64_OT_part_show, N64_OT_part_select, N64_OT_part_add, N64_OT_part_remove, N64_OT_costume_show,
-           N64_OT_expression_show, N64_OT_alt_texture_add, N64_OT_alt_texture_remove, N64_PT_fighter_view)
+           N64_OT_expression_show, N64_OT_alt_texture_add, N64_OT_alt_texture_remove, N64_OT_alt_texture_slot,
+           N64_OT_ref_item_show,
+           N64_OT_ref_opponent_toggle, N64_OT_ref_select_hold, N64_OT_ref_hold_sync, N64_PT_fighter_view,
+           N64_OT_stage_joint_add, N64_OT_stage_assign, N64_OT_stage_linear, N64_OT_stage_select,
+           N64_OT_stage_joint_remove, N64_OT_stage_joint_move, N64_OT_stage_joint_parent, N64_OT_stage_layer_remove,
+           N64_OT_stage_layer_fold, N64_OT_stage_joint_name, N64_PT_stage, N64_PT_stage_joint,
+           N64_OT_install_tools, N64_OT_write_game_files, N64_OT_open_path, N64_PT_game_files)
 
 
 def _collapse_visible_outliners():
@@ -4870,9 +6065,49 @@ def _collapse_outliner():
     return 0.75 if _collapse_outliner.tries < 3 else None
 
 
+def _sidebar_tabs():
+    """The shown 3D Views' sidebars on the scene's n64_sidebar_tab (the N64 tab), once per screen
+    (scene n64_sidebar_screens: a tab picked later stays). Needs the sidebar drawn first: retried."""
+    scene = bpy.context.scene
+    tab = scene.get('n64_sidebar_tab') if scene is not None else None
+    if not tab:
+        return True
+    done = set(scene.get('n64_sidebar_screens') or [])
+    pending = False
+    for win in bpy.context.window_manager.windows:
+        scr = win.screen
+        if scr is None or scr.name in done:
+            continue
+        ok = False
+        for area in scr.areas:
+            if area.type != 'VIEW_3D':
+                continue
+            for r in area.regions:
+                if r.type != 'UI' or r.width <= 1:
+                    continue
+                try:
+                    if r.active_panel_category != tab:
+                        r.active_panel_category = tab
+                    ok = True
+                    area.tag_redraw()
+                except (AttributeError, TypeError, ValueError):
+                    pending = True             # (not drawn yet, or the tab isn't there yet)
+        if ok:
+            done.add(scr.name)
+    scene['n64_sidebar_screens'] = sorted(done)
+    return not pending
+
+
+def _sidebar_tab_timer():
+    _sidebar_tab_timer.tries = getattr(_sidebar_tab_timer, 'tries', 0) + 1
+    return None if _sidebar_tabs() or _sidebar_tab_timer.tries >= 10 else 0.5
+
+
 def _workspace_changed(*_):
-    """A workspace shown for the first time: its outliner collapsed."""
+    """A workspace shown for the first time: its outliner collapsed, its sidebar on the N64 tab."""
     bpy.app.timers.register(_collapse_visible_outliners_once, first_interval=0.1)
+    _sidebar_tab_timer.tries = 0
+    bpy.app.timers.register(_sidebar_tab_timer, first_interval=0.2)
 
 
 def _collapse_visible_outliners_once():
@@ -4929,6 +6164,12 @@ def register():
         setattr(bpy.types.Scene, name, prop)
     for name, prop in JOINT_BONE_PROPS.items():
         setattr(bpy.types.Bone, name, prop)
+    bpy.types.Scene.n64ui_build_dir = bpy.props.StringProperty(
+        name='Game Files Folder', subtype='DIR_PATH', get=_build_dir_get, set=_build_dir_set,
+        description='Where Write Game Files puts the files to copy (relative to the .blend: //to_project)')
+    bpy.types.Scene.n64ui_opponent_action = bpy.props.EnumProperty(
+        name='Opponent Animation', items=_opp_actions, get=_opp_action_get, set=_opp_action_set,
+        description='The grabbed opponent\'s animation (its grabbed / thrown animations)')
     for name, prop in ARMATURE_PROPS.items():
         setattr(bpy.types.Armature, name, prop)
     bpy.types.Scene.n64ui_vs_stage = bpy.props.EnumProperty(
@@ -4948,6 +6189,8 @@ def register():
     if not bpy.app.background:
         _collapse_outliner.tries = 0
         bpy.app.timers.register(_collapse_outliner, first_interval=0.5)
+        _sidebar_tab_timer.tries = 0
+        bpy.app.timers.register(_sidebar_tab_timer, first_interval=0.6)
         bpy.msgbus.subscribe_rna(key=(bpy.types.Window, 'workspace'), owner=_MSGBUS_OWNER, args=(),
                                  notify=_workspace_changed)
     # picking / opening an image on a texture node refreshes the N64 view
@@ -4969,6 +6212,10 @@ def unregister():
     for name in SCENE_PROPS:
         if hasattr(bpy.types.Scene, name):
             delattr(bpy.types.Scene, name)
+    if hasattr(bpy.types.Scene, 'n64ui_build_dir'):
+        delattr(bpy.types.Scene, 'n64ui_build_dir')
+    if hasattr(bpy.types.Scene, 'n64ui_opponent_action'):
+        delattr(bpy.types.Scene, 'n64ui_opponent_action')
     for t, props in ((bpy.types.Bone, JOINT_BONE_PROPS), (bpy.types.Armature, ARMATURE_PROPS)):
         for name in props:
             if hasattr(t, name):
