@@ -85,6 +85,7 @@ def image(rel):
     if img is None:
         img = bpy.data.images.load(os.path.join(DIR, rel), check_existing=True)
         img.filepath = '//' + rel
+    img.alpha_mode = 'CHANNEL_PACKED'      # filtered like the game (n64_panel.game_alpha)
     return img
 
 
@@ -131,6 +132,8 @@ for m in bpy.data.materials:
         for node in m.node_tree.nodes:
             if node.type == 'TEX_IMAGE':
                 node.interpolation = 'Linear'                # the game filters (bilinear)
+                if node.image is not None:          # color and alpha filtered apart, like the game:
+                    node.image.alpha_mode = 'CHANNEL_PACKED'     # cut-outs get its edge border
                 if entry and entry.get('wrap'):     # Blender has one mode for both axes: use S's
                     try:
                         node.extension = EXTENSION.get(entry['wrap'].get('s'), 'REPEAT')
@@ -375,6 +378,11 @@ if SHIELD and arm is not None:
         bub.matrix_world = arm.matrix_world @ arm.data.bones['YRotN'].matrix_local     # at the joint
         bub.show_in_front = True
     scene['n64_shield_frames'] = int(SHIELD['frames'])
+if arm is not None and not IS_STAGE and 'n64_hidden_parts' in arm.keys():
+    # 'Rest Pose': one key per bone at rest (n64_panel; also its Rest Pose button), to go back to rest
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import n64_panel as _PR  # noqa: E402
+    _PR.ensure_rest_action(arm)
 if IS_STAGE:
     # One type collection per MPGroundData slot (layer), holding its rooms' meshes.
     stage_types = {
@@ -701,6 +709,7 @@ import blend_gamedata as GDB  # noqa: E402
 GDB.build(man)
 if arm is not None and man.get('joint_attrs') and not IS_STAGE and not man.get('object'):
     GDB.apply_joint_attrs(arm, man['joint_attrs'])      # (Bone > N64 Joint, Armature > N64 Fighter Joints)
+    PANEL.color_special_joints(arm, force=True)         # (viewport colors of the joints those name)
 for ob in bpy.data.objects:
     if ob.get('n64_gamedata') == 'collision_group':
         PANEL._set_collision_group_renderer(ob)

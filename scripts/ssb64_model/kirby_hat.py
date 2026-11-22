@@ -167,20 +167,31 @@ def pack(f, char_raw, char_head, textures, hat, item, costumes, say=print, extra
             body_an = [f.char_int.get(an + 4 * i) if an is not None else None for i in range(len(body_ms))]
             body_an = [res.remap[x] if x is not None else None for x in body_an]
             o = hat.get(detail) or hat.get('hi')
-            cmds = [GW.g(0xDE000000)]                                       # the body, then the hat
-            hat_names = []
-            if o is not None and o['tris']:
-                dls, mats = IF.build_joints([o], W, textures, blob, prologue, store, only_joint=HAT_JOINT,
-                                            mobj_order={HAT_JOINT: [None] * len(body_ms)})
+            body = (o or {}).get('body')        # Kirby's body edited in Blender (e.g. retextured): drawn from
+            hat_names = []                      # the blend with his own MObjs (same slots), not the ROM's DL
+            if body is not None:
+                names = list(body['names'])[:len(body_ms)]
+                names += [None] * (len(body_ms) - len(names))
+                dls, mats = IF.build_joints([dict(o, tris=body['tris'] + o['tris'])], W, textures, blob, prologue,
+                                            store, only_joint=HAT_JOINT, mobj_order={HAT_JOINT: names})
                 hat_names = mats[HAT_JOINT][len(body_ms):]
-                cmds.append(GW.g(0xDE000000))
-            top = blob.add(b''.join(cmds) + GW.g(0xDF000000), 8)
-            blob.ptr(top + 4, res.remap[dl])
-            if len(cmds) > 1:
-                blob.ptr(top + 12, dls[HAT_JOINT])
+                top = blob.add(GW.g(0xDE000000) + GW.g(0xDF000000), 8)
+                blob.ptr(top + 4, dls[HAT_JOINT])
+            else:
+                cmds = [GW.g(0xDE000000)]                                   # the body, then the hat
+                if o is not None and o['tris']:
+                    dls, mats = IF.build_joints([o], W, textures, blob, prologue, store, only_joint=HAT_JOINT,
+                                                mobj_order={HAT_JOINT: [None] * len(body_ms)})
+                    hat_names = mats[HAT_JOINT][len(body_ms):]
+                    cmds.append(GW.g(0xDE000000))
+                top = blob.add(b''.join(cmds) + GW.g(0xDF000000), 8)
+                blob.ptr(top + 4, res.remap[dl])
+                if len(cmds) > 1:
+                    blob.ptr(top + 12, dls[HAT_JOINT])
             lst, arr = lists(list(zip(body_ms, body_an)) + [mobj(n) for n in hat_names])
             out.append((top, lst, arr))
             say(f'  {label} {detail}: {len(o["tris"]) if o else 0} triangles'
+                + (f' + Kirby\'s body from the blend ({len(body["tris"])})' if body is not None else '')
                 + (f', {len(hat_names)} MObj(s) after the body\'s {len(body_ms)}' if hat_names else ''))
         return out
     header += hat_parts(hat, 'hat')
@@ -215,11 +226,26 @@ def pack(f, char_raw, char_head, textures, hat, item, costumes, say=print, extra
     return bytes(data)
 
 
+def dl_words(data, at, limit=4096):
+    """A display list's command words up to its end, pointer halves left out (they differ
+    between copies): what tells the ROM body's DL from another."""
+    out = []
+    o = at
+    while o + 8 <= len(data) and len(out) < limit:
+        w0 = struct.unpack_from('>I', data, o)[0]
+        out.append(w0)
+        if w0 >> 24 == 0xDF:
+            break
+        o += 8
+    return out
+
+
 def kirby_with_hat(rom_path, data):
     """Kirby from the ROM with kirby_hat.bin appended to his character data and its parts added as
     model part variants (hat: joint 2, item: joint 13) -> (fighter, {hat_variant, item_variant,
     body_mobjs}). What the Blender export shows and the import reads back against."""
     f, _, _, _ = rom_kirby(rom_path)
+    rom_body = {d: dl_words(f.char, x[0]) for d, x in body_fields(f).items()}
     head, ptrs, hdr, n_extra = read(data)
     base = len(f.char) + (-len(f.char) % 16)
     f.char = bytes(f.char) + bytes(base - len(f.char)) + bytes(data)
@@ -240,7 +266,16 @@ def kirby_with_hat(rom_path, data):
                 t = ptrs.get(hdr + PART_SIZE * k + o)
                 if t is not None:
                     f.main_ext[fld + o] = base + t
-            pair.append(dict(field=fld, dl=f.main_ext.get(fld), mobjsubs=f.main_ext.get(fld + 4), flags=0))
+            pair.append(dict(field=fld, dl=f.main_ext.get(fld), mobjsubs=f.main_ext.get(fld + 4),
+                             scripts=f.main_ext.get(fld + 8), flags=0))   # (costume scripts: Kirby's body colors)
+        if joint == HAT_JOINT:
+            # does the part draw Kirby's ROM body (its first call = the ROM body's display list) or
+            # its own (edited in Blender: pack's 'body')? The import keeps it that way
+            for d, k in (('hi', k0), ('lo', k0 + 1)):
+                top = ptrs.get(hdr + PART_SIZE * k)
+                sub = ptrs.get(top + 4) if top is not None else None
+                if sub is not None and dl_words(data, sub) != rom_body[d]:
+                    info.setdefault('own_body', {}).setdefault(key, []).append(d)
         f.modelparts.setdefault(joint, [])
         if key.startswith('extra_hat_'):
             info.setdefault('extra_hat_variants', []).append(len(f.modelparts[joint]))
@@ -280,12 +315,24 @@ def export(hat_bin, out_dir, rom_path=DEFAULT_ROM, animations=True, preview=True
     os.makedirs(out_dir)
     shutil.copy(hat_bin, os.path.join(out_dir, 'exported_' + BIN))
     ex = EX.Exporter(f, out_dir, 1)
-    if animations:                       # every Kirby animation, for reference
+    if animations:                       # the character's Kirby animations, then every ROM Kirby one
+        own = []
+        try:
+            own = hat_animations(os.path.dirname(os.path.dirname(os.path.abspath(hat_bin))), f)
+        except (OSError, ValueError, KeyError) as e:
+            print(f'  note: no kirby_hat/animations exported ({e})')
+        rom = []
         try:
             _, _, _, entries = rom_kirby(rom_path)
-            ex.fighter_anims = EX.rom_animations(entries, f, 'KIRBY')
+            rom = EX.rom_animations(entries, f, 'KIRBY')
         except (OSError, ValueError, KeyError) as e:
             print(f'  note: no Kirby animations exported ({e})')
+        taken = {x['name'] for x in own}
+        for x in rom:
+            while x['name'] in taken:
+                x['name'] += '_'
+            taken.add(x['name'])
+        ex.fighter_anims = own + rom
     ex.manifest['source'] = dict(kind='kirby_hat', folder=os.path.abspath(os.path.dirname(hat_bin)),
                                  rom=os.path.abspath(rom_path))
     ex.manifest['kirby_hat'] = dict(info, joint=HAT_JOINT, item_joint=ITEM_JOINT)
@@ -300,6 +347,79 @@ def export(hat_bin, out_dir, rom_path=DEFAULT_ROM, animations=True, preview=True
           + (f', item: part {info["item_variant"]} of joint {ITEM_JOINT}' if 'item_variant' in info else '')
           + f') -> {out_dir}')
     return out_dir
+
+
+ANIM_DIR = 'animations'      # (in the kirby_hat folder) Kirby's animations for the copied moves
+
+
+def hat_animations(char_dir, f):
+    """The character's kirby_hat/animations/*.bin (Kirby's animations for its copied moves), with
+    the flags its main.asm gives the Kirby actions playing them (add_new_action_params(KIRBY /
+    JKIRBY, ...); -1: Kirby's vanilla ones). Source 'kirby_hat/animations/<file>'."""
+    import export_model as EX
+    import figatree as FT
+    import motions as MO
+    adir = os.path.join(char_dir, 'kirby_hat', ANIM_DIR)
+    if not os.path.isdir(adir):
+        return []
+    name = os.path.basename(os.path.normpath(char_dir))
+    try:
+        mot, _ = MO.folder_motions(char_dir, name, 'KIRBY', anim_dir=f'kirby_hat/{ANIM_DIR}',
+                                   file_kind='KIRBY_ANIM', owners={'KIRBY', 'JKIRBY'})
+    except OSError as e:
+        print(f'  note: Kirby action flags not read ({e}); guessing them from each file\'s joint count')
+        mot = {}
+    out = []
+    for fn in sorted(os.listdir(adir), key=str.lower):
+        if not fn.lower().endswith('.bin'):
+            continue
+        stem = fn[:-4]
+        data = open(os.path.join(adir, fn), 'rb').read()
+        e = mot.get(stem) or dict(flags=None, actions=[], conflicts=[])
+        e['actions'] = list(dict.fromkeys(e['actions']))      # (KIRBY and JKIRBY lines: the same names)
+        flags, guessed = FT.pick_flags(f, data, [e['flags']] + [c[1] for c in e['conflicts']])
+        try:
+            anim = FT.load(f, data, flags=flags)
+        except Exception as err:          # (a file that isn't an animation)
+            print(f'  note: kirby_hat/{ANIM_DIR}/{fn}: not read ({err})')
+            continue
+        out.append(dict(name=EX.animation_name([stem] + e['actions'], ' (copy)'), anim=anim,
+                        actions=e['actions'], flags=flags, guessed=guessed or not e['actions'],
+                        source=f'kirby_hat/{ANIM_DIR}/{fn}'))
+    print(f'  {len(out)} kirby_hat animations ({sum(1 for x in out if x["guessed"])} with guessed flags)')
+    return out
+
+
+def import_animations(work_dir, export_dir, man, f, hat_dir):
+    """The character's Kirby animations edited in Blender (blend_to_gltf.py's changed fighter
+    animations whose source is kirby_hat/animations/<file>) -> HAT_DIR/animations/<file>.
+    (Flags changed in Blender: main.asm's add_new_action_params lines are left for you.)"""
+    import figatree as FT
+    try:
+        changed = json.load(open(os.path.join(work_dir, 'costumes.json'))).get('fighter_anims') or []
+    except (OSError, ValueError):
+        changed = []
+    infos = man.get('fighter_animations') or {}
+    prefix = f'kirby_hat/{ANIM_DIR}/'
+    for c in changed:
+        src = (infos.get(c['export_name']) or {}).get('source') or ''
+        if not src.startswith(prefix):
+            if c.get('export_name') in infos:
+                print(f'  note: {c["name"]}: Kirby\'s own (ROM) animation, edited: not written')
+            continue
+        flags = int(str(c['flags']), 16)
+        written = FT.written_flags(flags)
+        loops = {b: True for b in c['values']} if c.get('loop') else None
+        data = FT.encode_animation(f, written, c['values'], c['frames'], loops=loops, candidates=c.get('keys'))
+        adir = os.path.join(hat_dir, ANIM_DIR)
+        os.makedirs(adir, exist_ok=True)
+        path = os.path.join(adir, src[len(prefix):])
+        before = os.path.getsize(path) if os.path.exists(path) else 0
+        open(path, 'wb').write(data)
+        msg = f'  kirby animation {src[len(prefix):]}: {before} -> {len(data)} bytes'
+        if written != int(str(c.get('flags_before') or '0'), 16):
+            msg += f'; flags now {written:08X}: update its add_new_action_params lines in main.asm'
+        print(msg)
 
 
 def import_blend(work_dir, export_dir, hat_bin, rom_path=None):
@@ -317,8 +437,25 @@ def import_blend(work_dir, export_dir, hat_bin, rom_path=None):
     n_body = len(MF.pointer_run(f.char_int, body_fields(f)['hi'][1]))
     body = {name for p in man.get('model_parts') or [] if p['joint'] == HAT_JOINT and p['variant'] >= kh['hat_variant']
             for name in (p.get('mobj_order') or [])[:n_body] if name}
-    objs = {o['name']: o for o in IF.load_gltf(os.path.join(work_dir, 'parts.gltf'))} \
+    objs = {o['name']: o for o in IF.merge_same_name(IF.load_gltf(os.path.join(work_dir, 'parts.gltf'), one_joint=True))} \
         if os.path.exists(os.path.join(work_dir, 'parts.gltf')) else {}
+
+    body_order = {(p['variant'], p['detail']): (p.get('mobj_order') or [])[:n_body]
+                  for p in man.get('model_parts') or [] if p['joint'] == HAT_JOINT}
+    # the body's triangles as exported (the ROM body): per hat part, from the export's model.gltf
+    exp_gl = os.path.join(export_dir, 'model.gltf')
+    exp_objs = {o['name']: o for o in IF.load_gltf(exp_gl)} if os.path.exists(exp_gl) else {}
+
+    def rom_body_tris(name):
+        o = exp_objs.get(name)
+        return sum(1 for m, _ in o['tris'] if IF.base_mat(m) in body) if o else None
+
+    # parts whose file already drew their own body (exported that way): keep drawing the blend's
+    own_body = set()
+    for key, details in (kh.get('own_body') or {}).items():
+        v = kh['hat_variant'] if key == 'hat' else \
+            (kh.get('extra_hat_variants') or [])[int(key.rsplit('_', 1)[1])]
+        own_body |= {(v, d) for d in details}
 
     def part(variant, joint):
         out = {}
@@ -326,6 +463,12 @@ def import_blend(work_dir, export_dir, hat_bin, rom_path=None):
             o = objs.get(f'part{variant}_{d}_j{joint:02d}')
             if o is not None:
                 out[d] = dict(o, tris=[(m, t) for m, t in o['tris'] if IF.base_mat(m) not in body])
+                own = [(m, t) for m, t in o['tris'] if IF.base_mat(m) in body]
+                # Kirby's body edited (some of its triangles now another material, e.g. fur, or
+                # reshaped: its triangle count changed): the file draws the blend's body
+                ref = rom_body_tris(f'part{variant}_{d}_j{joint:02d}') if joint == HAT_JOINT else None
+                if (ref and len(own) != ref) or (joint == HAT_JOINT and (variant, d) in own_body):
+                    out[d]['body'] = dict(tris=own, names=body_order.get((variant, d), []))
         return out
     hat = part(kh['hat_variant'], HAT_JOINT)
     # (no item exported: a new part<N>_hi_j13 after Kirby's own joint 13 parts)
@@ -340,6 +483,7 @@ def import_blend(work_dir, export_dir, hat_bin, rom_path=None):
     data = pack(f, char_raw, char_head, textures, hat, item, n, extra_hats=extras)
     open(hat_bin, 'wb').write(data)
     print(f'wrote {hat_bin} ({len(data)} bytes)')
+    import_animations(work_dir, export_dir, man, f, os.path.dirname(os.path.abspath(hat_bin)))
     return hat_bin
 
 
