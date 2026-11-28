@@ -1,5 +1,7 @@
 import lineinfile
 import os
+import platform
+import subprocess
 import sys
 import shutil
 import yaml
@@ -44,9 +46,15 @@ class CharacterAppender:
             original_xdelta = os.path.join(smashremix_path, "original.xdelta")
             original_z64 = os.path.join(
                 smashremix_path, "roms", "original.z64")
-            result = run_windows_command(
-                f'{xdelta_exe} -d -f -s {ssb_rom} {original_xdelta} {original_z64}'
-            )
+            native_xdelta = shutil.which("xdelta3") if platform.system() != "Windows" else None
+            if native_xdelta:
+                result = subprocess.run(
+                    [native_xdelta, "-d", "-f", "-s", ssb_rom, original_xdelta, original_z64],
+                    capture_output=True, text=True)
+            else:
+                result = run_windows_command(
+                    f'{xdelta_exe} -d -f -s {ssb_rom} {original_xdelta} {original_z64}'
+                )
             if result.returncode != 0:
                 print(result.stderr)
             print("OK")
@@ -1319,6 +1327,15 @@ class CharacterAppender:
             else:
                 raise ValueError("extra item would land in the vanilla item bitmask (not supported)")
         item_asm = item_asm[:m.start(1)] + f"0x{default:08X}" + item_asm[m.end(1):]
+
+        # Extra items can add weapons (Projectile.add_projectile), but Stages.asm
+        # includes Item.asm before main.asm gets to Projectile.asm: include it first
+        # (top level; it has an include guard)
+        m = re.search(r"^scope Item \{", item_asm, re.M)
+        if not m:
+            raise RuntimeError("Item.asm: scope Item not found")
+        item_asm = (item_asm[:m.start()] + 'include "Projectile.asm"         // (extra items: add_projectile)\n'
+                    + item_asm[m.start():])
 
         # Item code (inside scope Item), before the add_item list
         marker = re.search(r"^\s*print \"=+ ITEMS =+", item_asm, re.M)
